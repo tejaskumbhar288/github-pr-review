@@ -111,3 +111,30 @@ def test_prompt_omits_the_section_when_there_are_no_known_issues(pr):
     from app.review.prompt import build_user_prompt
 
     assert "Known issues" not in build_user_prompt(pr, None, [])
+
+
+async def test_the_semgrep_config_default_is_compatible_with_metrics_off(settings, pr, monkeypatch):
+    """Regression: the shipped default was `--config auto`, which semgrep
+    refuses whenever metrics are off - and the pre-pass hardcodes `--metrics
+    off`, because phoning the registry home about proprietary code is the exact
+    thing the local path exists to avoid. Every semgrep run failed with
+    "Cannot create auto config when metrics are off", the error was swallowed as
+    a degraded tool, and the pre-pass silently returned ruff findings only.
+    """
+    import sys
+
+    captured: list[list[str]] = []
+
+    async def fake_exec(self, cmd, *, cwd):
+        captured.append(cmd)
+
+    monkeypatch.setattr(StaticAnalyzer, "_exec", fake_exec)
+    # Any real file resolves as "the semgrep binary"; the command is what matters.
+    analyzer = StaticAnalyzer(
+        settings.with_overrides(static_analysis=True, semgrep_path=sys.executable)
+    )
+    await analyzer.analyze(pr, {"src/io.py": "import os\n"})
+
+    (semgrep_cmd,) = [c for c in captured if c[0] == sys.executable]
+    assert "--metrics" in semgrep_cmd and semgrep_cmd[semgrep_cmd.index("--metrics") + 1] == "off"
+    assert semgrep_cmd[semgrep_cmd.index("--config") + 1] != "auto"

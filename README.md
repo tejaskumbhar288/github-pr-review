@@ -242,7 +242,7 @@ app/
 evals/
   cases.json            the offline suite
   fixtures/             hand-written diffs with planted bugs
-tests/                  218 offline tests + 25 Redis integration tests
+tests/                  219 offline tests + 25 Redis integration tests
 ```
 
 ## Design notes
@@ -263,6 +263,18 @@ findings in the body, and says so in the output.
 `COMMENT` whenever findings exist, and `REQUEST_CHANGES` only escalates when
 something is actually critical. A bot that blocks a merge on a hallucination
 gets uninstalled.
+
+**`--config auto` is a trap.** Semgrep refuses `auto` unless metrics are on,
+because auto asks the registry which rules to run. The pre-pass hardcodes
+`--metrics off` - phoning home about proprietary code is the exact thing the
+local path exists to avoid - so the two cannot both be true. The shipped default
+was `auto`, every semgrep run failed with `Cannot create auto config when
+metrics are off`, the error was swallowed as a degraded tool, and the pre-pass
+quietly returned ruff findings only. The default is now `p/default`, and a test
+asserts it is not `auto`. Semgrep itself stays out of `requirements-dev.txt` -
+it is a large install for a pre-pass that already works on ruff alone - so
+`pip install semgrep` is what turns it on, and the pre-pass picks it up off PATH
+without any further configuration.
 
 **Giving up visibly.** Releasing the reservation on failure is what keeps a
 transient outage from poisoning a PR, and it is also how a permanently broken
@@ -299,14 +311,16 @@ Verified end to end against a real PR, a real model and real infrastructure:
 | Dead-letter queue | real server: fail -> dead-letter -> `make dlq` -> requeue |
 | Docker | image builds, container serves, degrades without Redis |
 | Eval suite | 83% detection, 0 noise, 0.0 drop rate against `gemini-3.6-flash` |
+| Ollama | full eval suite on a local `llama3.2:3b`: 50% detection, drop rate 0.0 |
+| semgrep | real binary, real rules: 2 findings on the SQL-injection fixture |
 
-Not yet exercised against reality: the GitHub App token exchange (needs an App),
-Ollama, and semgrep.
+Not yet exercised against reality: the GitHub App token exchange, which needs an
+App to exist.
 
 ## Testing
 
 ```bash
-make test                                              # 218 offline tests
+make test                                              # 219 offline tests
 REDIS_TEST_URL=redis://localhost:6379/0 make test      # + 25 against real Redis
 ```
 

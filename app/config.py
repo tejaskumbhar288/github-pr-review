@@ -103,7 +103,12 @@ class Settings:
     static_analysis: bool = True
     ruff_path: str = "ruff"
     semgrep_path: str = "semgrep"
-    semgrep_config: str = "auto"
+    # NOT "auto". Semgrep refuses `--config auto` unless metrics are on, because
+    # auto asks the registry which rules to run - and the pre-pass runs with
+    # `--metrics off`, which is the whole point of the local path. The two are
+    # mutually exclusive, so the default is a concrete ruleset that works with
+    # telemetry off.
+    semgrep_config: str = "p/default"
     static_analysis_timeout: float = 60.0
     max_known_issues: int = 60
 
@@ -143,7 +148,7 @@ class Settings:
             static_analysis=_bool(e, "STATIC_ANALYSIS", True),
             ruff_path=_str(e, "RUFF_PATH", "ruff"),
             semgrep_path=_str(e, "SEMGREP_PATH", "semgrep"),
-            semgrep_config=_str(e, "SEMGREP_CONFIG", "auto"),
+            semgrep_config=_str(e, "SEMGREP_CONFIG", "p/default"),
             static_analysis_timeout=float(_int(e, "STATIC_ANALYSIS_TIMEOUT", 60, minimum=5)),
             max_known_issues=_int(e, "MAX_KNOWN_ISSUES", 60, minimum=0),
         )
