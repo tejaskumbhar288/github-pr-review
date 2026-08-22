@@ -1,0 +1,22 @@
+# Secrets. .env holds a real API key; it must never be committed.
+.env
+.env.*
+!.env.example
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Eval output
+evals/results*.json
+evals/cases.live.json

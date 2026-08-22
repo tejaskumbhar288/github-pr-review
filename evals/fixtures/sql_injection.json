@@ -1,0 +1,18 @@
+{
+  "owner": "fixture",
+  "repo": "store",
+  "number": 2,
+  "title": "Add user search endpoint",
+  "body": "Lets support staff look users up by email fragment.",
+  "head_sha": "fixture-sql-injection",
+  "files": [
+    {
+      "path": "store/users.py",
+      "status": "modified",
+      "additions": 12,
+      "deletions": 0,
+      "patch": "@@ -1,8 +1,20 @@\n import sqlite3\n \n \n def connect(path):\n     return sqlite3.connect(path)\n \n \n+def search_users(conn, fragment, limit):\n+    query = f\"SELECT id, email FROM users WHERE email LIKE '%{fragment}%' LIMIT {limit}\"\n+    cursor = conn.execute(query)\n+    return cursor.fetchall()\n+\n+\n+def get_user(conn, user_id):\n+    cursor = conn.execute(\"SELECT id, email FROM users WHERE id = ?\", (user_id,))\n+    return cursor.fetchone()\n+\n+\n def close(conn):\n     conn.close()",
+      "content": "import sqlite3\n\n\ndef connect(path):\n    return sqlite3.connect(path)\n\n\ndef search_users(conn, fragment, limit):\n    query = f\"SELECT id, email FROM users WHERE email LIKE '%{fragment}%' LIMIT {limit}\"\n    cursor = conn.execute(query)\n    return cursor.fetchall()\n\n\ndef get_user(conn, user_id):\n    cursor = conn.execute(\"SELECT id, email FROM users WHERE id = ?\", (user_id,))\n    return cursor.fetchone()\n\n\ndef close(conn):\n    conn.close()\n"
+    }
+  ]
+}

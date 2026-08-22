@@ -1,0 +1,34 @@
+[project]
+name = "ai-code-review"
+version = "0.2.0"
+description = "AI code review assistant for GitHub pull requests"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[project.scripts]
+ai-review = "app.cli:main"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:app.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RET", "PTH"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+# SAMPLE_PATCH is a real unified diff; its context lines start with a literal
+# space, so "trailing whitespace" is the fixture being correct.
+"tests/conftest.py" = ["S101", "W293"]

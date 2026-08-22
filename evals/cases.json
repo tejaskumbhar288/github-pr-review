@@ -1,0 +1,79 @@
+{
+  "cases": [
+    {
+      "name": "off-by-one-slice",
+      "fixture": "fixtures/off_by_one.json",
+      "description": "Pagination returns one element too many, and clamps to page 0 when empty.",
+      "expected": [
+        {
+          "file": "app/pagination.py",
+          "line": 13,
+          "window": 3,
+          "description": "slice end is `end + 1`, returning one extra item",
+          "keywords": ["off-by-one", "extra", "one more", "additional", "too many", "end + 1", "overlap"],
+          "min_severity": "major"
+        },
+        {
+          "file": "app/pagination.py",
+          "line": 9,
+          "window": 3,
+          "description": "empty items -> total_pages 0 -> page 0 -> negative start index",
+          "keywords": ["empty", "zero", "negative", "0"],
+          "min_severity": "minor"
+        }
+      ]
+    },
+    {
+      "name": "sql-injection",
+      "fixture": "fixtures/sql_injection.json",
+      "description": "User input interpolated straight into a SQL string.",
+      "expected": [
+        {
+          "file": "store/users.py",
+          "line": 9,
+          "window": 3,
+          "description": "f-string builds the query from `fragment` and `limit`",
+          "keywords": ["injection", "sql", "parameter", "sanitis", "sanitiz", "placeholder", "bind"],
+          "min_severity": "major"
+        }
+      ]
+    },
+    {
+      "name": "resource-leak",
+      "fixture": "fixtures/resource_leak.json",
+      "description": "Unclosed file handle, truncating reopen per batch, and a swallowed exception.",
+      "expected": [
+        {
+          "file": "io/exporter.py",
+          "line": 8,
+          "window": 4,
+          "description": "open() without a context manager or close()",
+          "keywords": ["close", "context manager", "with", "leak", "handle", "resource"],
+          "min_severity": "major"
+        },
+        {
+          "file": "io/exporter.py",
+          "line": 19,
+          "window": 3,
+          "description": "bare `except Exception: pass` hides every failure",
+          "keywords": ["swallow", "silent", "except", "pass", "hides", "log"],
+          "min_severity": "major"
+        },
+        {
+          "file": "io/exporter.py",
+          "line": 18,
+          "window": 3,
+          "description": "each batch reopens the same path in 'w' mode, truncating the last",
+          "keywords": ["truncat", "overwrit", "append", "\"w\"", "'w'", "mode"],
+          "min_severity": "major"
+        }
+      ]
+    },
+    {
+      "name": "clean-refactor",
+      "fixture": "fixtures/clean_refactor.json",
+      "description": "Behaviour-preserving extraction. A good reviewer says nothing. Every finding here is noise.",
+      "expected": []
+    }
+  ]
+}

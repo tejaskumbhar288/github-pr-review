@@ -1,0 +1,98 @@
+{
+  "summary": {
+    "provider": "gemini",
+    "model": "gemini-3.6-flash",
+    "cases": 4,
+    "errors": 0,
+    "detection": 0.8333,
+    "bugs_found": 5,
+    "found_by_model": 2,
+    "found_by_linter": 3,
+    "bugs_expected": 6,
+    "noise_per_case": 0.0,
+    "drop_rate": 0.0,
+    "forbidden_hits": 0,
+    "total_tokens": 9904,
+    "duration_s": 35.9
+  },
+  "cases": [
+    {
+      "name": "off-by-one-slice",
+      "kind": "fixture",
+      "found": [
+        "app/pagination.py:13 slice end is `end + 1`, returning one extra item <- model app/pagination.py:13 Page slice returns per_page + 1 items"
+      ],
+      "missed": [
+        "app/pagination.py:9 empty items -> total_pages 0 -> page 0 -> negative start index"
+      ],
+      "noise": [],
+      "forbidden_hits": [],
+      "total_findings": 1,
+      "found_by_model": 1,
+      "found_by_linter": 0,
+      "drop_rate": 0.0,
+      "dropped": 0,
+      "proposed": 1,
+      "tokens": 5215,
+      "latency_ms": 35876.673411010415,
+      "error": null
+    },
+    {
+      "name": "sql-injection",
+      "kind": "fixture",
+      "found": [
+        "store/users.py:9 f-string builds the query from `fragment` and `limit` <- ruff S608"
+      ],
+      "missed": [],
+      "noise": [],
+      "forbidden_hits": [],
+      "total_findings": 0,
+      "found_by_model": 0,
+      "found_by_linter": 1,
+      "drop_rate": 0.0,
+      "dropped": 0,
+      "proposed": 0,
+      "tokens": 1335,
+      "latency_ms": 16156.349760000012,
+      "error": null
+    },
+    {
+      "name": "resource-leak",
+      "kind": "fixture",
+      "found": [
+        "io/exporter.py:8 open() without a context manager or close() <- ruff SIM115",
+        "io/exporter.py:19 bare `except Exception: pass` hides every failure <- ruff S110",
+        "io/exporter.py:18 each batch reopens the same path in 'w' mode, truncating the last <- model io/exporter.py:18 Loop overwrites file on each batch iteration"
+      ],
+      "missed": [],
+      "noise": [],
+      "forbidden_hits": [],
+      "total_findings": 1,
+      "found_by_model": 1,
+      "found_by_linter": 2,
+      "drop_rate": 0.0,
+      "dropped": 0,
+      "proposed": 1,
+      "tokens": 2165,
+      "latency_ms": 14315.311776008457,
+      "error": null
+    },
+    {
+      "name": "clean-refactor",
+      "kind": "fixture",
+      "found": [],
+      "missed": [],
+      "noise": [],
+      "forbidden_hits": [],
+      "total_findings": 0,
+      "found_by_model": 0,
+      "found_by_linter": 0,
+      "drop_rate": 0.0,
+      "dropped": 0,
+      "proposed": 0,
+      "tokens": 1189,
+      "latency_ms": 5072.295231002499,
+      "error": null
+    }
+  ]
+}

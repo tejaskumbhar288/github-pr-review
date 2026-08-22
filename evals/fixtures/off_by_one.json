@@ -1,0 +1,18 @@
+{
+  "owner": "fixture",
+  "repo": "pagination",
+  "number": 1,
+  "title": "Add bounds handling to get_page",
+  "body": "Clamp the page number and avoid an IndexError past the last page.",
+  "head_sha": "fixture-off-by-one",
+  "files": [
+    {
+      "path": "app/pagination.py",
+      "status": "modified",
+      "additions": 9,
+      "deletions": 2,
+      "patch": "@@ -1,10 +1,17 @@\n def total_pages(items, per_page):\n     return (len(items) + per_page - 1) // per_page\n \n \n def get_page(items, page, per_page):\n     if page < 1:\n         page = 1\n-    start = (page - 1) * per_page\n-    return items[start:start + per_page]\n+    if page > total_pages(items, per_page):\n+        page = total_pages(items, per_page)\n+    start = (page - 1) * per_page\n+    end = start + per_page\n+    if end <= len(items):\n+        return items[start:end + 1]\n+    return items[start:]\n+\n+\n+def page_count(items, per_page):\n+    return total_pages(items, per_page)",
+      "content": "def total_pages(items, per_page):\n    return (len(items) + per_page - 1) // per_page\n\n\ndef get_page(items, page, per_page):\n    if page < 1:\n        page = 1\n    if page > total_pages(items, per_page):\n        page = total_pages(items, per_page)\n    start = (page - 1) * per_page\n    end = start + per_page\n    if end <= len(items):\n        return items[start:end + 1]\n    return items[start:]\n\n\ndef page_count(items, per_page):\n    return total_pages(items, per_page)\n"
+    }
+  ]
+}

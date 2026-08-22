@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Live cases run against real PRs. Copy this to cases.live.json, fill in PRs",
+    "whose bugs you have personally verified, and run:",
+    "    python -m app.evals --cases evals/cases.live.json",
+    "Do not guess the line numbers - open the PR's Files-changed tab and read",
+    "the number in the right-hand gutter. A wrong expectation scores a correct",
+    "review as a miss and sends you optimising the prompt in the wrong direction."
+  ],
+  "cases": [
+    {
+      "name": "example-live-case",
+      "url": "https://github.com/OWNER/REPO/pull/123",
+      "description": "One sentence on what is wrong with this PR.",
+      "forbidden_files": ["vendor/thirdparty.py"],
+      "expected": [
+        {
+          "file": "path/from/the/diff.py",
+          "line": 42,
+          "window": 6,
+          "description": "what the bug actually is",
+          "keywords": ["race", "lock"],
+          "min_severity": "major"
+        }
+      ]
+    }
+  ]
+}

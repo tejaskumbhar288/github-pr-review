@@ -1,0 +1,18 @@
+{
+  "owner": "fixture",
+  "repo": "exporter",
+  "number": 3,
+  "title": "Export records to CSV",
+  "body": "Writes the report out for the nightly job.",
+  "head_sha": "fixture-resource-leak",
+  "files": [
+    {
+      "path": "io/exporter.py",
+      "status": "modified",
+      "additions": 14,
+      "deletions": 0,
+      "patch": "@@ -1,6 +1,20 @@\n import csv\n import logging\n \n log = logging.getLogger(__name__)\n \n \n+def export(records, path):\n+    handle = open(path, \"w\")\n+    writer = csv.writer(handle)\n+    for record in records:\n+        writer.writerow([record.id, record.name])\n+    return path\n+\n+\n+def export_all(batches, path):\n+    try:\n+        for batch in batches:\n+            export(batch, path)\n+    except Exception:\n+        pass\n+\n+\n def describe():\n     return \"csv exporter\"",
+      "content": "import csv\nimport logging\n\nlog = logging.getLogger(__name__)\n\n\ndef export(records, path):\n    handle = open(path, \"w\")\n    writer = csv.writer(handle)\n    for record in records:\n        writer.writerow([record.id, record.name])\n    return path\n\n\ndef export_all(batches, path):\n    try:\n        for batch in batches:\n            export(batch, path)\n    except Exception:\n        pass\n\n\ndef describe():\n    return \"csv exporter\"\n"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "owner": "fixture",
+  "repo": "util",
+  "number": 4,
+  "title": "Extract slugify helper",
+  "body": "Pure refactor. No behaviour change.",
+  "head_sha": "fixture-clean-refactor",
+  "files": [
+    {
+      "path": "util/strings.py",
+      "status": "modified",
+      "additions": 8,
+      "deletions": 3,
+      "patch": "@@ -1,12 +1,17 @@\n import re\n \n _NON_WORD = re.compile(r\"[^a-z0-9]+\")\n \n \n+def slugify(value):\n+    lowered = value.strip().lower()\n+    collapsed = _NON_WORD.sub(\"-\", lowered)\n+    return collapsed.strip(\"-\")\n+\n+\n def build_url(base, title):\n-    lowered = title.strip().lower()\n-    collapsed = _NON_WORD.sub(\"-\", lowered)\n-    slug = collapsed.strip(\"-\")\n+    slug = slugify(title)\n     return f\"{base.rstrip('/')}/{slug}\"",
+      "content": "import re\n\n_NON_WORD = re.compile(r\"[^a-z0-9]+\")\n\n\ndef slugify(value):\n    lowered = value.strip().lower()\n    collapsed = _NON_WORD.sub(\"-\", lowered)\n    return collapsed.strip(\"-\")\n\n\ndef build_url(base, title):\n    slug = slugify(title)\n    return f\"{base.rstrip('/')}/{slug}\"\n"
+    }
+  ]
+}
