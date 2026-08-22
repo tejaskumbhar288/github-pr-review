@@ -121,7 +121,8 @@ commit is dropped while a new commit on the same PR is a genuinely new job. Jobs
 move through a Redis processing list rather than a bare `BRPOP`, so a worker
 that dies mid-review doesn't silently lose it — the next worker to start
 requeues the orphan. A failed review *releases* its reservation, so a transient
-provider outage doesn't permanently poison a PR.
+provider outage doesn't permanently poison a PR — but only `MAX_ATTEMPTS` times,
+after which it stops being retried and lands in a dead-letter list.
 
 Without Redis the queue degrades to an in-process one with a loud warning, so
 `make worker` works on a laptop with no infrastructure at all.
@@ -229,8 +230,9 @@ app/
   server/
     security.py         HMAC-SHA256 webhook verification
     app.py              FastAPI receiver, enqueue-and-return
-    queue.py            Redis queue + (pr, head_sha) idempotency
+    queue.py            Redis queue, idempotency, dead-letter list
     worker.py           async review worker
+    dlq.py              read the dead-letter list, and drain it
   obs/
     metrics.py          what a review is worth measuring by
     tracing.py          Langfuse, or a no-op that still logs
@@ -240,7 +242,7 @@ app/
 evals/
   cases.json            the offline suite
   fixtures/             hand-written diffs with planted bugs
-tests/                  184 offline tests + 15 Redis integration tests
+tests/                  218 offline tests + 25 Redis integration tests
 ```
 
 ## Design notes
@@ -262,6 +264,22 @@ findings in the body, and says so in the output.
 something is actually critical. A bot that blocks a merge on a hallucination
 gets uninstalled.
 
+**Giving up visibly.** Releasing the reservation on failure is what keeps a
+transient outage from poisoning a PR, and it is also how a permanently broken
+job gets retried forever on every redelivery. So failures are counted per
+`(pr, head_sha)` — on the key, not the job, because a redelivery arrives as a
+fresh job whose counter would reset every time — and the job that exhausts its
+budget is dead-lettered instead of handed back. Orphan recovery counts an
+attempt too, or a job that hard-crashes its worker never reaches the failure
+path at all and loops for as long as the service runs. What died is on
+`/readyz` as a `dead` count and in `make dlq`, which can requeue it once the
+cause is fixed.
+
+```bash
+make dlq                      # what died, why, how long ago
+make dlq ARGS=--requeue       # put it all back
+```
+
 **Bounded `.env` discovery.** python-dotenv's default walks up until it finds a
 `.env`, which can reach `$HOME` and silently load an unrelated file. This looks
 in the working directory and the project root, and nowhere else.
@@ -278,6 +296,7 @@ Verified end to end against a real PR, a real model and real infrastructure:
 | GitHub read path | real pagination, real diffs, 46 anchors parsed from a live patch |
 | Webhook -> worker | signed delivery -> 202 -> Redis -> worker -> graceful failure |
 | Redis queue | real server: `SET NX` under a 25-way race, orphan recovery |
+| Dead-letter queue | real server: fail -> dead-letter -> `make dlq` -> requeue |
 | Docker | image builds, container serves, degrades without Redis |
 | Eval suite | 83% detection, 0 noise, 0.0 drop rate against `gemini-3.6-flash` |
 
@@ -287,17 +306,22 @@ Ollama, and semgrep.
 ## Testing
 
 ```bash
-make test                                              # 184 offline tests
-REDIS_TEST_URL=redis://localhost:6379/0 make test      # + 15 against real Redis
+make test                                              # 218 offline tests
+REDIS_TEST_URL=redis://localhost:6379/0 make test      # + 25 against real Redis
 ```
 
 The offline suite needs no network and no services. The Redis suite covers what
 only a real server exercises — the `BRPOPLPUSH` handoff, `SET NX` under a
 concurrent webhook storm, and orphan recovery after a worker dies mid-review.
 
+CI runs lint, the offline suite on 3.11 and 3.13, the Redis suite against a
+service container, and a Docker build. The eval gate needs a model key, which a
+fork's PR is never given, so it is guarded rather than left to fail: set
+`GEMINI_API_KEY` as a repository secret to turn it on.
+
 ## Roadmap
 
-All six planned steps are implemented. What's next:
+All six planned steps are implemented, plus the dead-letter queue. What's next:
 
 1. **Incremental review.** Review only the commits added since the last review
    of the same PR, instead of the whole diff again on every push.
@@ -305,5 +329,3 @@ All six planned steps are implemented. What's next:
    file it lives in. The retrieval question this opens is the interesting part.
 3. **Comment resolution.** Track which findings the author addressed, and use
    that as a real-world precision signal to feed back into the evals.
-4. **Dead-letter queue.** Jobs that fail repeatedly currently release their
-   reservation and can be retried forever; they should land somewhere visible.

@@ -1,0 +1,112 @@
+# The offline suite needs no network and no services, so it runs on every push
+# and gates every PR. The two things it cannot cover - a real Redis and a real
+# model - get their own jobs: Redis as a service container, and the eval suite
+# only when a key is configured, so a fork's PR is never failed by a secret it
+# was never given.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check app tests
+      - run: ruff format --check app tests
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor from pyproject's requires-python, and the version the
+        # project is actually developed on.
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+
+  redis:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      # The BRPOPLPUSH handoff, SET NX under a concurrent storm, and orphan
+      # recovery are only real against a real server.
+      - run: pytest -q tests/test_redis_integration.py
+        env:
+          REDIS_TEST_URL: redis://localhost:6379/0
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t ai-code-review:ci .
+      # The image is useless if it cannot import its own entrypoints.
+      - run: docker run --rm ai-code-review:ci python -c "import app.server.app, app.server.worker"
+
+  eval:
+    # A prompt change that finds more bugs and invents more is not an
+    # improvement, so the quality gate runs on the real model. It needs a key,
+    # which a fork's PR does not get - hence the guard rather than a failure.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Check for a model key
+        id: key
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: echo "present=${{ secrets.GEMINI_API_KEY != '' }}" >> "$GITHUB_OUTPUT"
+      - name: Run the offline eval suite
+        if: steps.key.outputs.present == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python -m app.evals --fixtures-only --min-detection 0.6 --max-drop-rate 0.2
+      - name: Skipped
+        if: steps.key.outputs.present != 'true'
+        run: echo "No GEMINI_API_KEY configured; skipping the model-backed eval gate."
