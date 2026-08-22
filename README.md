@@ -133,6 +133,11 @@ Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` to trace token spend,
 latency and per-review metrics; `drop_rate` is also emitted as a Langfuse score
 so it can be charted and alerted on.
 
+Set `LANGFUSE_HOST` to the region the project actually lives in — `cloud`,
+`us.cloud` or `jp.cloud` — because a key from one region returns a flat 401 on
+the others, with `Invalid credentials` and no hint that the keys are fine and
+only the host is wrong.
+
 Tracing is optional in both directions — missing package, missing keys, or a
 Langfuse outage all degrade to a no-op, and every metric is still written to the
 structured log. The drop-rate number is too useful to make contingent on a SaaS
@@ -242,7 +247,7 @@ app/
 evals/
   cases.json            the offline suite
   fixtures/             hand-written diffs with planted bugs
-tests/                  219 offline tests + 25 Redis integration tests
+tests/                  226 offline tests + 25 Redis integration tests
 ```
 
 ## Design notes
@@ -275,6 +280,22 @@ asserts it is not `auto`. Semgrep itself stays out of `requirements-dev.txt` -
 it is a large install for a pre-pass that already works on ruff alone - so
 `pip install semgrep` is what turns it on, and the pre-pass picks it up off PATH
 without any further configuration.
+
+**A score has to point at something.** Langfuse rejects a score that
+references no trace, session, dataset run or observation — the whole ingestion
+batch comes back `400`, and because the SDK reports that from its background
+thread the review itself carries on looking healthy. `record()` ran after the
+review span had closed and passed no trace id, so the `drop_rate` score this
+README advertises was never written once. The trace id now rides a `ContextVar`
+from the span to the record call: a `ContextVar` and not an attribute because
+the worker runs concurrent reviews over one shared tracer, and single-use
+because the no-reviewable-files path records without ever opening a span and
+would otherwise be scored against the previous review's trace.
+
+One cosmetic thing is unfixed: Langfuse names the trace after the metrics event
+rather than the root `pr-review` span, so the trace list reads `review_metrics`.
+Write order does not change it and this SDK version exposes no `update_trace`.
+The trace contents are correct — span, generation and event correctly nested.
 
 **Giving up visibly.** Releasing the reservation on failure is what keeps a
 transient outage from poisoning a PR, and it is also how a permanently broken
@@ -313,6 +334,7 @@ Verified end to end against a real PR, a real model and real infrastructure:
 | Eval suite | 83% detection, 0 noise, 0.0 drop rate against `gemini-3.6-flash` |
 | Ollama | full eval suite on a local `llama3.2:3b`: 50% detection, drop rate 0.0 |
 | semgrep | real binary, real rules: 2 findings on the SQL-injection fixture |
+| Langfuse | real project: span + generation + event nested, `drop_rate` scored |
 
 Not yet exercised against reality: the GitHub App token exchange, which needs an
 App to exist.
@@ -320,7 +342,7 @@ App to exist.
 ## Testing
 
 ```bash
-make test                                              # 219 offline tests
+make test                                              # 226 offline tests
 REDIS_TEST_URL=redis://localhost:6379/0 make test      # + 25 against real Redis
 ```
 

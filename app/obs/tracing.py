@@ -9,6 +9,7 @@ fail a review.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 from collections.abc import Iterator
@@ -20,6 +21,25 @@ if TYPE_CHECKING:  # pragma: no cover
     from .metrics import ReviewMetrics
 
 log = logging.getLogger("review.metrics")
+
+# The trace the current review belongs to. Langfuse rejects a score that
+# references nothing, and `record()` runs *after* the review span has closed, so
+# the id has to outlive the span.
+#
+# A ContextVar rather than an attribute because the worker runs reviews
+# concurrently over one shared tracer: each consumer is its own asyncio task and
+# gets its own copy of the context, so two reviews in flight cannot write each
+# other's trace id.
+_current_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "langfuse_trace_id", default=None
+)
+
+# The review span itself, so the metrics event can be filed under it. A second
+# root observation would work, but Langfuse names a trace after its root and the
+# trace list would read "review_metrics" instead of "pr-review".
+_current_span_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "langfuse_span_id", default=None
+)
 
 
 class Tracer:
@@ -64,8 +84,14 @@ class LangfuseTracer(Tracer):
     @contextmanager
     def review(self, name: str, **metadata: Any) -> Iterator[Span]:
         span: Any = None
+        # Clear first: a span that fails to open must not inherit the trace of
+        # whatever this task reviewed last.
+        _current_trace_id.set(None)
+        _current_span_id.set(None)
         try:
             span = self._client.start_observation(name=name, as_type="span", metadata=metadata)
+            _current_trace_id.set(span.trace_id)
+            _current_span_id.set(span.id)
         except Exception as exc:  # noqa: BLE001 - tracing must never break a review
             log.debug("langfuse span failed: %s", exc)
 
@@ -82,12 +108,38 @@ class LangfuseTracer(Tracer):
     def record(self, metrics: ReviewMetrics) -> None:
         super().record(metrics)
         payload = metrics.as_dict()
+        # One review opens one span and records once, so the trace id is
+        # consumed here. Leaving it set would file the *next* review's metrics -
+        # the no-reviewable-files path never opens a span - against this trace.
+        trace_id = _current_trace_id.get()
+        span_id = _current_span_id.get()
+        _current_trace_id.set(None)
+        _current_span_id.set(None)
         try:
-            self._client.create_event(name="review_metrics", metadata=payload)
+            # Without the trace context the event opens a second, orphan trace
+            # instead of joining the review it describes.
+            context: dict[str, str] | None = None
+            if trace_id:
+                context = {"trace_id": trace_id}
+                if span_id:
+                    context["parent_span_id"] = span_id
+            self._client.create_event(
+                name="review_metrics",
+                metadata=payload,
+                trace_context=context,
+            )
+            if trace_id is None:
+                # Langfuse requires a score to reference exactly one of
+                # traceId/sessionId/datasetRunId/observationId and rejects the
+                # batch with a 400 otherwise. Nothing ran, so there is nothing
+                # to score.
+                log.debug("no review trace to attach the drop_rate score to; skipping")
+                return
             # Scores make drop-rate chartable and alertable in the Langfuse UI.
             self._client.create_score(
                 name="drop_rate",
                 value=metrics.drop_rate,
+                trace_id=trace_id,
                 comment=f"{metrics.dropped_findings}/{metrics.proposed_findings} unanchorable",
             )
         except Exception as exc:  # noqa: BLE001
