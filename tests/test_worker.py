@@ -101,3 +101,41 @@ async def test_force_still_reviews_a_previously_reviewed_commit(monkeypatch, set
 
     assert len(llm.calls) == 1
     assert outcome.published.posted
+
+
+async def test_a_repeatedly_failing_pr_is_dead_lettered_instead_of_retried(
+    monkeypatch, settings, pr
+):
+    """Roadmap 4: without a give-up point, a PR that fails every time is retried
+    on every redelivery forever and nothing but the log says so."""
+
+    class Boom(FakeProvider):
+        async def complete_json(self, **kwargs):
+            raise RuntimeError("model down")
+
+    gh = FakeGitHub(pr)
+    original = ReviewSession.__init__
+    monkeypatch.setattr(
+        ReviewSession,
+        "__init__",
+        lambda self, s, **kw: original(self, s, gh=gh, llm=Boom()),
+    )
+
+    q = MemoryQueue(max_attempts=2)
+    worker = ReviewWorker(settings, q)
+
+    def job():
+        return ReviewJob(owner="acme", repo="widget", number=7, head_sha="head456")
+
+    await q.enqueue(job())
+    assert not await worker.handle(await q.dequeue(timeout=1))
+    assert worker.dead_lettered == 0
+
+    # Second delivery of the same commit: this one exhausts the budget.
+    assert await q.enqueue(job())
+    assert not await worker.handle(await q.dequeue(timeout=1))
+    assert worker.dead_lettered == 1
+
+    assert await q.dead_depth() == 1
+    assert not await q.enqueue(job()), "a dead-lettered commit stops being retried"
+    assert (await q.dead_letters())[0]["error"] == "RuntimeError: model down"

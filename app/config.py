@@ -89,6 +89,9 @@ class Settings:
     # Idempotency window for (pr, head_sha); GitHub redelivers webhooks.
     idempotency_ttl: int = 86_400
     worker_concurrency: int = 2
+    # How many times a job may fail before it stops being retried and lands in
+    # the dead-letter list instead.
+    max_attempts: int = 3
 
     # --- Observability (roadmap 4) ---
     langfuse_public_key: str | None = None
@@ -132,6 +135,7 @@ class Settings:
             queue_name=_str(e, "QUEUE_NAME", "reviews"),
             idempotency_ttl=_int(e, "IDEMPOTENCY_TTL", 86_400, minimum=60),
             worker_concurrency=_int(e, "WORKER_CONCURRENCY", 2, minimum=1),
+            max_attempts=_int(e, "MAX_ATTEMPTS", 3, minimum=1),
             langfuse_public_key=_opt(e, "LANGFUSE_PUBLIC_KEY"),
             langfuse_secret_key=_opt(e, "LANGFUSE_SECRET_KEY"),
             langfuse_host=_str(e, "LANGFUSE_HOST", "https://cloud.langfuse.com"),

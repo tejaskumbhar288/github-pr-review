@@ -142,3 +142,12 @@ def test_service_refuses_to_boot_without_a_secret(settings):
 
     with pytest.raises(ConfigError, match="GITHUB_WEBHOOK_SECRET"):
         create_app(settings.with_overrides(github_webhook_secret=None))
+
+
+def test_readiness_surfaces_the_dead_letter_depth(client, queue):
+    """A dead letter that only exists in a log line is not visible to anyone
+    who has to act on it."""
+    assert client.get("/readyz").json()["dead"] == 0
+
+    queue._dead.append({"job": {}, "error": "boom", "attempts": 3, "died_at": 0})
+    assert client.get("/readyz").json()["dead"] == 1

@@ -71,9 +71,14 @@ def create_app(settings: Settings | None = None, queue: JobQueue | None = None) 
             return JSONResponse({"status": "starting"}, status_code=503)
         try:
             depth = await q.depth()
+            # Surfaced here because a dead letter that only exists in a log line
+            # is not "visible" in any sense an on-call person can act on.
+            dead = await q.dead_depth()
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"status": "degraded", "error": str(exc)}, status_code=503)
-        return JSONResponse({"status": "ok", "queue": getattr(q, "name", "?"), "depth": depth})
+        return JSONResponse(
+            {"status": "ok", "queue": getattr(q, "name", "?"), "depth": depth, "dead": dead}
+        )
 
     @app.post("/webhook")
     async def webhook(

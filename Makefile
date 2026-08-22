@@ -2,7 +2,7 @@ VENV := .venv
 PY   := $(VENV)/bin/python
 PIP  := $(VENV)/bin/pip
 
-.PHONY: help install review test lint fmt eval eval-baseline serve worker up down clean
+.PHONY: help install review test lint fmt eval eval-baseline serve worker dlq up down clean
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -43,6 +43,9 @@ serve: ## Run the webhook receiver locally
 
 worker: ## Run the async review worker
 	$(PY) -m app.server.worker
+
+dlq: ## Show the dead-letter queue (make dlq ARGS=--requeue to drain it)
+	$(PY) -m app.server.dlq $(ARGS)
 
 up: ## Bring up redis + api + worker
 	docker compose up --build

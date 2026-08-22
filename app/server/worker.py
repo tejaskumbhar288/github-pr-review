@@ -39,6 +39,7 @@ class ReviewWorker:
         self._stopping = asyncio.Event()
         self.processed = 0
         self.failed = 0
+        self.dead_lettered = 0
 
     def stop(self) -> None:
         self._stopping.set()
@@ -57,7 +58,12 @@ class ReviewWorker:
                 task.cancel()
             await asyncio.gather(*consumers, return_exceptions=True)
             self._tracer.shutdown()
-            log.info("worker stopped (processed=%d failed=%d)", self.processed, self.failed)
+            log.info(
+                "worker stopped (processed=%d failed=%d dead_lettered=%d)",
+                self.processed,
+                self.failed,
+                self.dead_lettered,
+            )
 
     async def _consume(self, index: int) -> None:
         while not self._stopping.is_set():
@@ -90,7 +96,8 @@ class ReviewWorker:
         except Exception as exc:  # noqa: BLE001 - one bad PR must not kill the worker
             self.failed += 1
             log.exception("review failed for %s", job.dedupe_key)
-            await self._queue.fail(job, f"{type(exc).__name__}: {exc}")
+            if await self._queue.fail(job, f"{type(exc).__name__}: {exc}"):
+                self.dead_lettered += 1
             return False
 
         await self._queue.complete(job)

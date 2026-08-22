@@ -28,9 +28,27 @@ async def queue():
     name = f"test-{uuid.uuid4().hex[:8]}"
     q = RedisQueue(client, name, ttl=60)
     yield q
-    await client.delete(q._key, q._processing)
-    for key in await client.keys("review:seen:*"):
-        await client.delete(key)
+    await client.delete(q._key, q._processing, q._dead_key)
+    for pattern in ("review:seen:*", "review:fails:*"):
+        for key in await client.keys(pattern):
+            await client.delete(key)
+    await client.aclose()
+
+
+@pytest.fixture
+async def strict_queue():
+    """A queue that dead-letters on the first failure, so the give-up path can
+    be exercised without three round trips per assertion."""
+    import redis.asyncio as aioredis
+
+    client = aioredis.from_url(URL, decode_responses=True)
+    name = f"test-{uuid.uuid4().hex[:8]}"
+    q = RedisQueue(client, name, ttl=60, max_attempts=1)
+    yield q
+    await client.delete(q._key, q._processing, q._dead_key)
+    for pattern in ("review:seen:*", "review:fails:*"):
+        for key in await client.keys(pattern):
+            await client.delete(key)
     await client.aclose()
 
 
@@ -177,3 +195,107 @@ async def test_a_socket_read_timeout_is_treated_as_an_empty_poll():
         assert await q.dequeue(timeout=5) is None
     finally:
         await client.aclose()
+
+
+# --- dead-letter queue ----------------------------------------------------
+
+
+async def test_the_failure_counter_survives_a_new_job_object(queue):
+    """The whole point of counting on the key: a redelivery is a fresh
+    ReviewJob with attempts=0, and INCR is what remembers the streak."""
+    for expected in (1, 2):
+        await queue.enqueue(job("sha1"))
+        j = await queue.dequeue(timeout=1)
+        assert not await queue.fail(j, "provider down")
+        assert int(await queue._redis.get(queue._fail_key(j.dedupe_key))) == expected
+
+
+async def test_a_job_is_dead_lettered_once_it_exhausts_its_attempts(strict_queue):
+    q = strict_queue
+    await q.enqueue(job("sha1"))
+    assert await q.fail(await q.dequeue(timeout=1), "GitHubError: 404") is True
+
+    assert await q.dead_depth() == 1
+    (record,) = await q.dead_letters()
+    assert record["job"]["head_sha"] == "sha1"
+    assert record["error"] == "GitHubError: 404"
+    assert record["attempts"] == 1
+
+
+async def test_a_dead_lettered_commit_keeps_its_reservation(strict_queue):
+    q = strict_queue
+    await q.enqueue(job("sha1"))
+    await q.fail(await q.dequeue(timeout=1), "boom")
+    assert not await q.enqueue(job("sha1")), "redeliveries must stop re-running it"
+    assert await q.depth() == 0
+
+
+async def test_a_dead_lettered_job_leaves_the_processing_list_clean(strict_queue):
+    q = strict_queue
+    await q.enqueue(job("sha1"))
+    await q.fail(await q.dequeue(timeout=1), "boom")
+    assert await q._redis.llen(q._processing) == 0
+
+
+async def test_a_success_clears_the_failure_counter(queue):
+    await queue.enqueue(job("sha1"))
+    j = await queue.dequeue(timeout=1)
+    await queue.fail(j, "transient")
+
+    await queue.enqueue(job("sha1"))
+    await queue.complete(await queue.dequeue(timeout=1))
+    assert await queue._redis.get(queue._fail_key(j.dedupe_key)) is None
+
+
+async def test_draining_requeues_with_a_fresh_budget(strict_queue):
+    q = strict_queue
+    await q.enqueue(job("sha1"))
+    await q.fail(await q.dequeue(timeout=1), "boom")
+
+    assert await q.drain_dead_letters() == 1
+    assert await q.dead_depth() == 0
+    assert await q.depth() == 1
+    # Both the reservation and the count were cleared, so the retry actually
+    # gets to run instead of being dead-lettered again on contact.
+    j = await q.dequeue(timeout=1)
+    assert j.head_sha == "sha1"
+    assert await q._redis.get(q._fail_key(j.dedupe_key)) is None
+
+
+async def test_an_orphan_counts_as_a_failed_attempt(queue):
+    """A job that hard-crashes its worker never reaches fail(), so orphan
+    recovery is the only place the attempt can be counted. Without this a
+    poison pill is recovered, re-crashes and loops forever."""
+    await queue.enqueue(job("sha1"))
+    j = await queue.dequeue(timeout=1)  # now sitting in the processing list
+
+    assert await queue.requeue_stale() == 1
+    assert int(await queue._redis.get(queue._fail_key(j.dedupe_key))) == 1
+    assert await queue.depth() == 1
+
+
+async def test_a_poison_pill_orphan_is_quarantined_not_requeued(strict_queue):
+    q = strict_queue
+    await q.enqueue(job("sha1"))
+    await q.dequeue(timeout=1)
+
+    assert await q.requeue_stale() == 0, "it must not go back on the queue"
+    assert await q.depth() == 0
+    assert await q.dead_depth() == 1
+    assert (await q.dead_letters())[0]["error"] == "orphaned by a crashed worker"
+
+
+async def test_a_healthy_orphan_still_comes_back(queue):
+    await queue.enqueue(job("sha1"))
+    await queue.dequeue(timeout=1)
+
+    assert await queue.requeue_stale() == 1
+    assert await queue.dead_depth() == 0
+    assert (await queue.dequeue(timeout=1)).head_sha == "sha1"
+
+
+async def test_a_malformed_orphan_is_dropped_rather_than_looping(queue):
+    await queue._redis.lpush(queue._processing, "{not json")
+    assert await queue.requeue_stale() == 0
+    assert await queue.depth() == 0
+    assert await queue.dead_depth() == 0
