@@ -6,7 +6,14 @@ from pathlib import Path
 import pytest
 
 from app.evals.cases import ExpectedBug, load_cases, load_fixture_pr
-from app.evals.harness import CaseReport, EvalReport, render_diff, render_report, score_case
+from app.evals.harness import (
+    CaseReport,
+    EvalReport,
+    gate,
+    render_diff,
+    render_report,
+    score_case,
+)
 from app.obs.metrics import ReviewMetrics
 from app.review.engine import Finding, ReviewResult
 
@@ -409,3 +416,68 @@ def test_one_linter_finding_cannot_satisfy_two_expected_bugs():
     result.known_issues = [StaticFinding("ruff", "a.py", 10, "X", "resource leak")]
     report = score_case(case, result)
     assert report.found_by_linter == 1 and len(report.missed) == 1
+
+
+# --- CI gating ------------------------------------------------------------
+
+
+def _report(*cases: CaseReport) -> EvalReport:
+    report = EvalReport(provider="fake", model="m")
+    report.cases = list(cases)
+    return report
+
+
+def test_a_clean_run_passes_the_gate():
+    report = _report(CaseReport(name="a", kind="fixture", found=["1"]))
+    assert gate(report, min_detection=0.6) == (0, "")
+
+
+def test_an_errored_case_fails_the_run_by_default():
+    """The trap this closes: errored cases are excluded from every metric, so a
+    run where the only surviving case did well reports a detection rate CI would
+    read as a pass. A partial run is not evidence."""
+    report = _report(
+        CaseReport(name="ok", kind="fixture", found=["1"]),
+        CaseReport(name="quota", kind="fixture", error="LLMError: quota exceeded"),
+    )
+    assert report.detection == 1.0  # the flattering number, computed from one case
+
+    code, message = gate(report, min_detection=0.6)
+    assert code == 1
+    assert "quota" in message and "errored" in message
+
+
+def test_allow_errors_opts_back_into_a_partial_run():
+    report = _report(
+        CaseReport(name="ok", kind="fixture", found=["1"]),
+        CaseReport(name="boom", kind="fixture", error="boom"),
+    )
+    assert gate(report, min_detection=0.6, allow_errors=True) == (0, "")
+
+
+def test_errors_are_reported_before_the_metric_gates():
+    """An errored run is unusable regardless of what the surviving numbers say,
+    so the error is the message, not a detection failure downstream of it."""
+    report = _report(CaseReport(name="boom", kind="fixture", error="boom"))
+    code, message = gate(report, min_detection=0.9, max_drop_rate=0.0)
+    assert code == 1 and "errored" in message and "detection" not in message
+
+
+def test_detection_below_the_floor_still_fails():
+    report = _report(CaseReport(name="a", kind="fixture", found=["1"], missed=["2", "3"]))
+    code, message = gate(report, min_detection=0.6)
+    assert code == 1 and "detection" in message
+
+
+def test_drop_rate_above_the_ceiling_still_fails():
+    report = _report(CaseReport(name="a", kind="fixture", found=["1"], proposed=10, dropped=5))
+    code, message = gate(report, max_drop_rate=0.2)
+    assert code == 1 and "drop rate" in message
+
+
+def test_the_error_warning_says_the_numbers_are_partial():
+    report = _report(
+        CaseReport(name="ok", kind="fixture", found=["1"]),
+        CaseReport(name="boom", kind="fixture", error="boom"),
+    )
+    assert "excluded from every number" in render_report(report)

@@ -271,7 +271,10 @@ def render_report(report: EvalReport, *, verbose: bool = False) -> str:
     if s["forbidden_hits"]:
         lines.append(f"WARNING: {s['forbidden_hits']} finding(s) on forbidden files")
     if s["errors"]:
-        lines.append(f"WARNING: {s['errors']} case(s) errored")
+        lines.append(
+            f"WARNING: {s['errors']} case(s) errored and are excluded from every "
+            f"number above; this run is not comparable to a clean one"
+        )
 
     if verbose:
         for c in report.cases:
@@ -319,6 +322,34 @@ def render_diff(current: EvalReport, baseline: dict[str, Any]) -> str:
 # --- entrypoint -----------------------------------------------------------
 
 
+def gate(
+    report: EvalReport,
+    *,
+    min_detection: float | None = None,
+    max_drop_rate: float | None = None,
+    allow_errors: bool = False,
+) -> tuple[int, str]:
+    """Decide whether a run passes, and say why if it does not.
+
+    Errored cases are checked first and fail by default, because they are
+    excluded from every metric: a run where five of six cases crashed reports
+    the detection rate of the one that survived, which is a number CI would
+    happily read as a pass. A partial run is not evidence either way.
+    """
+    errored = [c for c in report.cases if c.error]
+    if errored and not allow_errors:
+        names = ", ".join(c.name for c in errored)
+        return 1, (
+            f"FAIL: {len(errored)} case(s) errored ({names}); "
+            f"the metrics above cover only the {len(report.ok_cases)} that ran"
+        )
+    if min_detection is not None and report.detection < min_detection:
+        return 1, f"FAIL: detection {report.detection:.0%} < {min_detection:.0%}"
+    if max_drop_rate is not None and report.drop_rate > max_drop_rate:
+        return 1, f"FAIL: drop rate {report.drop_rate:.1%} > {max_drop_rate:.1%}"
+    return 0, ""
+
+
 async def _main(args: argparse.Namespace) -> int:
     settings = get_settings()
     if args.provider:
@@ -353,13 +384,15 @@ async def _main(args: argparse.Namespace) -> int:
         Path(args.out).write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
         print(f"\nwrote {args.out}")
 
-    if args.min_detection is not None and report.detection < args.min_detection:
-        print(f"\nFAIL: detection {report.detection:.0%} < {args.min_detection:.0%}")
-        return 1
-    if args.max_drop_rate is not None and report.drop_rate > args.max_drop_rate:
-        print(f"\nFAIL: drop rate {report.drop_rate:.1%} > {args.max_drop_rate:.1%}")
-        return 1
-    return 0
+    code, message = gate(
+        report,
+        min_detection=args.min_detection,
+        max_drop_rate=args.max_drop_rate,
+        allow_errors=args.allow_errors,
+    )
+    if message:
+        print(f"\n{message}")
+    return code
 
 
 def main() -> None:
@@ -378,6 +411,11 @@ def main() -> None:
     parser.add_argument("--baseline", help="compare against a previous --out file")
     parser.add_argument("--min-detection", type=float, help="exit 1 below this detection rate")
     parser.add_argument("--max-drop-rate", type=float, help="exit 1 above this drop rate")
+    parser.add_argument(
+        "--allow-errors",
+        action="store_true",
+        help="report errored cases without failing the run (they still skew every metric)",
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
