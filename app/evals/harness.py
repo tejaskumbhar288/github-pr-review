@@ -31,6 +31,7 @@ from ..config import Settings, get_settings
 from ..github.client import GitHubClient, parse_pr_url
 from ..llm.factory import build_provider
 from ..obs.logging import setup_logging
+from ..obs.tracing import build_tracer
 from ..review.analysis import StaticAnalyzer
 from ..review.engine import Finding, ReviewEngine, ReviewResult
 from .cases import EvalCase, ExpectedBug, load_cases, load_fixture_pr
@@ -199,7 +200,13 @@ class EvalRunner:
         started = time.perf_counter()
         llm = build_provider(self._settings)
         gh = GitHubClient(self._settings.github_token, self._settings.github_api)
-        engine = ReviewEngine(gh, llm, self._settings, analyzer=StaticAnalyzer(self._settings))
+        # Eval runs are traced like any other review. One tracer is shared across
+        # the cases even when they run concurrently: the trace id rides a
+        # ContextVar, so each case's asyncio task carries its own copy.
+        tracer = build_tracer(self._settings)
+        engine = ReviewEngine(
+            gh, llm, self._settings, analyzer=StaticAnalyzer(self._settings), tracer=tracer
+        )
 
         report = EvalReport(provider=llm.name, model=llm.model)
         sem = asyncio.Semaphore(concurrency)
@@ -213,6 +220,9 @@ class EvalRunner:
         finally:
             await gh.close()
             await llm.close()
+            # Without this the process can exit before the background sender
+            # has shipped anything, which looks exactly like tracing being off.
+            tracer.flush()
 
         for case, res in zip(cases, results, strict=True):
             if isinstance(res, BaseException):

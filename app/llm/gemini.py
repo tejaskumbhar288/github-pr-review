@@ -34,14 +34,6 @@ BASE = "https://generativelanguage.googleapis.com/v1beta"
 # diff it has never seen, which scales with the diff, not with the verdict.
 MAX_OUTPUT_TOKENS = 32768
 
-# A review is allowed this many findings. The cap is not about taste - an
-# unbounded array lets the model keep generating, and it does: on two real PRs
-# it ran to answer=28411 and answer=24301 tokens once the output budget was
-# raised enough to let it. Bounding the array server-side stops the runaway at
-# the source, and a review carrying more than this many findings was never
-# going to be read anyway.
-MAX_FINDINGS = 25
-
 # Response schema enforced server-side. Native structured output is far more
 # reliable than describing the shape in the prompt and hoping.
 RESPONSE_SCHEMA: dict[str, Any] = {
@@ -50,7 +42,6 @@ RESPONSE_SCHEMA: dict[str, Any] = {
         "summary": {"type": "string"},
         "findings": {
             "type": "array",
-            "maxItems": MAX_FINDINGS,
             "items": {
                 "type": "object",
                 "properties": {
