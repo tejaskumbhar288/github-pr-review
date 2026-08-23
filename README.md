@@ -66,7 +66,19 @@ required, and set `GEMINI_API_KEY` in `.env`.
 
 Free-tier quotas have been cut without notice before, so `with_backoff()` in
 `llm/base.py` handles 429s with exponential backoff and full jitter, honouring
-`Retry-After` in either the seconds or the HTTP-date form. Note that free-tier
+`Retry-After` in either the seconds or the HTTP-date form, and falling back to
+the `RetryInfo` Google puts in the response body when it sends no header.
+
+Not every 429 is worth retrying, though. The free tier caps requests **per day,
+per project, per model** — 20/day on `gemini-3.6-flash` at the time of writing —
+and a daily cap is terminal: each retry spends another request from a budget
+that is already gone, so one eval run can burn the rest of the day. The provider
+reads the `QuotaFailure` detail and raises a non-retryable error for a `PerDay`
+quota, retrying only the per-minute ones. Google makes this easy to get wrong:
+the body advertises a `retryDelay` of ~40s even when the quota will not reset
+for hours. Because the cap is per-model, switching `GEMINI_MODEL` gets you a
+fresh budget — but a baseline recorded on one model is not comparable to a run
+on another. Note that free-tier
 prompts may be used to improve Google's models — fine for the public repos this
 is demoed on, not fine for proprietary code. That's what the Ollama path is for.
 

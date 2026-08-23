@@ -104,8 +104,7 @@ class GeminiProvider(LLMProvider):
                 raise LLMError(f"cannot reach the Gemini API: {exc}") from exc
 
             if resp.status_code == 429:
-                retry = retry_after_seconds(resp.headers.get("retry-after"))
-                raise RateLimited("gemini quota exceeded", retry)
+                raise _quota_error(resp)
             if resp.status_code >= 500:
                 raise RateLimited(f"gemini {resp.status_code}")
             if resp.status_code == 400 and "API key" in resp.text:
@@ -128,6 +127,75 @@ class GeminiProvider(LLMProvider):
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+
+def _quota_error(resp: httpx.Response) -> Exception:
+    """Classify a 429: a daily cap is terminal, everything else is transient.
+
+    Both arrive as RESOURCE_EXHAUSTED, but retrying a per-day quota does not
+    just fail - each attempt spends another request from the exhausted budget,
+    so five retries across four eval cases can burn a whole day's free tier
+    without a single call succeeding. Google makes this easy to get wrong: the
+    body carries a RetryInfo of ~40s even when the quota does not reset for
+    hours.
+    """
+    body = _error_body(resp)
+    for violation in _quota_violations(body):
+        quota_id = str(violation.get("quotaId") or "")
+        if "PerDay" not in quota_id:
+            continue
+        model = (violation.get("quotaDimensions") or {}).get("model") or "the model"
+        limit = violation.get("quotaValue")
+        cap = f" ({limit}/day" if limit else " ("
+        return LLMError(
+            f"gemini daily quota exhausted for {model}{cap} on the free tier); "
+            "it resets at midnight Pacific, and retrying spends requests you "
+            "no longer have - switch models, use LLM_PROVIDER=ollama, or wait"
+        )
+
+    retry = retry_after_seconds(resp.headers.get("retry-after"))
+    if retry is None:
+        retry = _retry_info_seconds(body)
+    return RateLimited("gemini quota exceeded", retry)
+
+
+def _error_body(resp: httpx.Response) -> dict[str, Any]:
+    try:
+        parsed = resp.json()
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _quota_violations(body: dict[str, Any]) -> list[dict[str, Any]]:
+    details = (body.get("error") or {}).get("details") or []
+    out: list[dict[str, Any]] = []
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        if not str(detail.get("@type", "")).endswith("QuotaFailure"):
+            continue
+        for violation in detail.get("violations") or []:
+            if isinstance(violation, dict):
+                out.append(violation)
+    return out
+
+
+def _retry_info_seconds(body: dict[str, Any]) -> float | None:
+    """Read RetryInfo.retryDelay, a protobuf duration string like "40s"."""
+    for detail in (body.get("error") or {}).get("details") or []:
+        if not isinstance(detail, dict):
+            continue
+        if not str(detail.get("@type", "")).endswith("RetryInfo"):
+            continue
+        raw = str(detail.get("retryDelay") or "").strip()
+        if raw.endswith("s"):
+            raw = raw[:-1]
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return None
+    return None
 
 
 def _extract_usage(data: dict[str, Any]) -> TokenUsage:
