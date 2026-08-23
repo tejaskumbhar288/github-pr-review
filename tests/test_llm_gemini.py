@@ -240,6 +240,54 @@ async def test_truncated_json_is_reported_as_truncation_not_as_bad_json(provider
 
 
 @respx.mock
+async def test_a_truncated_response_is_retried_rather_than_failing_the_review(provider):
+    """Truncation is sampling variance, not a property of the request.
+
+    Observed live: one attempt ran to answer=26383 tokens and was cut off; the
+    identical prompt returned a complete 643-token review moments later. The
+    extraction therefore has to happen inside the retried call - when it sat
+    after the backoff, a single unlucky sample failed the whole review.
+    """
+    half = '{"summary": "long", "findings": [{"file": "a.py"'
+    route = respx.post(URL).mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {"content": {"parts": [{"text": half}]}, "finishReason": "MAX_TOKENS"}
+                    ]
+                },
+            ),
+            httpx.Response(200, json=ok_body()),
+        ]
+    )
+
+    result = await complete(provider)
+
+    assert route.call_count == 2
+    assert result.attempts == 2
+    assert result.data == {"summary": "fine", "findings": []}
+
+
+@respx.mock
+async def test_persistent_truncation_still_names_the_knobs_to_turn(provider):
+    respx.post(URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {"content": {"parts": [{"text": "{"}]}, "finishReason": "MAX_TOKENS"}
+                ]
+            },
+        )
+    )
+
+    with pytest.raises(LLMError, match="MAX_FILES"):
+        await complete(provider)
+
+
+@respx.mock
 async def test_a_safety_block_with_partial_text_is_still_a_safety_block(provider):
     respx.post(URL).mock(
         return_value=httpx.Response(

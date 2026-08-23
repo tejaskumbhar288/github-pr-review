@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from app.pipeline import ReviewSession
@@ -139,3 +141,32 @@ async def test_a_repeatedly_failing_pr_is_dead_lettered_instead_of_retried(
     assert await q.dead_depth() == 1
     assert not await q.enqueue(job()), "a dead-lettered commit stops being retried"
     assert (await q.dead_letters())[0]["error"] == "RuntimeError: model down"
+
+
+async def test_the_queue_wait_is_reported_in_real_seconds(settings, caplog):
+    """perf_counter counts from an arbitrary origin, time.time from the epoch.
+
+    Subtracting one from the other logged a queue wait of -1787342661.8s on the
+    first real webhook - a number so wrong it reads as a timestamp, which is
+    exactly what it was.
+    """
+    import logging
+
+    queue = MemoryQueue()
+    job = ReviewJob(owner="o", repo="r", number=1, head_sha="deadbee")
+    job.enqueued_at = time.time() - 3.0
+
+    worker = ReviewWorker(settings, queue)
+    with caplog.at_level(logging.INFO):
+        try:
+            await worker.handle(job)
+        except Exception:
+            pass
+
+    waits = [
+        float(m.split("queued ")[1].split("s ago")[0])
+        for m in (r.getMessage() for r in caplog.records)
+        if "queued " in m and "s ago" in m
+    ]
+    assert waits, "the worker never logged a queue wait"
+    assert 0.0 <= waits[0] < 60.0, f"implausible queue wait: {waits[0]}"

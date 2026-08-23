@@ -105,7 +105,7 @@ class GeminiProvider(LLMProvider):
             },
         }
 
-        async def _call() -> dict[str, Any]:
+        async def _call() -> tuple[dict[str, Any], str]:
             try:
                 resp = await self._client.post(
                     url, json=payload, headers={"x-goog-api-key": self._key}
@@ -123,12 +123,19 @@ class GeminiProvider(LLMProvider):
                 raise LLMError("gemini rejected the API key - check GEMINI_API_KEY")
             if resp.status_code >= 400:
                 raise LLMError(f"gemini {resp.status_code}: {resp.text[:400]}")
-            return resp.json()
+
+            # Extract inside the retried call, not after it. A truncated
+            # response is a sampling accident rather than a property of the
+            # request - the same prompt that ran to 26k answer tokens and was
+            # cut off produced a complete 643-token review on the next attempt -
+            # so it has to be raised where the backoff can still see it.
+            data = resp.json()
+            return data, _extract_text(data)
 
         outcome = await with_backoff(_call, max_retries=self._max_retries)
-        data = outcome.value
+        data, text = outcome.value
         return LLMResponse(
-            data=parse_json_payload(_extract_text(data)),
+            data=parse_json_payload(text),
             model=self.model,
             provider=self.name,
             usage=_extract_usage(data),
@@ -234,9 +241,12 @@ def _extract_text(data: dict[str, Any]) -> str:
     # sent half an object to the parser, which could only report "model did
     # not return JSON" - hiding the one cause the caller can actually act on.
     if finish == "MAX_TOKENS":
-        raise LLMError(
+        # Retryable: see the note in complete_json. If every attempt truncates,
+        # the prompt really is too big and the message says which knobs to turn.
+        raise RateLimited(
             f"gemini hit the {MAX_OUTPUT_TOKENS}-token output limit mid-response"
-            f"{_token_breakdown(data)} - lower MAX_FILES or CONTEXT_CHAR_LIMIT"
+            f"{_token_breakdown(data)} - retrying; if this persists, "
+            "lower MAX_FILES or CONTEXT_CHAR_LIMIT"
         )
     if finish == "SAFETY":
         raise LLMError("gemini blocked the response on safety grounds")

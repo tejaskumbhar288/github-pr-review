@@ -82,7 +82,12 @@ class ReviewWorker:
 
     async def handle(self, job: ReviewJob) -> bool:
         started = time.perf_counter()
-        log.info("reviewing %s (queued %.1fs ago)", job.dedupe_key, started - job.enqueued_at)
+        # enqueued_at is wall clock and perf_counter is a monotonic counter from
+        # an arbitrary origin, so the two cannot be subtracted from each other.
+        # Clamp as well: the api and the worker need not share a clock, and a
+        # queue wait is never negative.
+        waited = max(0.0, time.time() - job.enqueued_at)
+        log.info("reviewing %s (queued %.1fs ago)", job.dedupe_key, waited)
         try:
             token = await self._token_for(job)
             async with ReviewSession(self._settings, token=token, tracer=self._tracer) as session:
