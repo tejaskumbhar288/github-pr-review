@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import time
 
 import pytest
@@ -157,11 +158,10 @@ async def test_the_queue_wait_is_reported_in_real_seconds(settings, caplog):
     job.enqueued_at = time.time() - 3.0
 
     worker = ReviewWorker(settings, queue)
-    with caplog.at_level(logging.INFO):
-        try:
-            await worker.handle(job)
-        except Exception:
-            pass
+    # The review itself will fail - there is no GitHub here - but the wait is
+    # logged before any of that happens.
+    with caplog.at_level(logging.INFO), contextlib.suppress(Exception):
+        await worker.handle(job)
 
     waits = [
         float(m.split("queued ")[1].split("s ago")[0])
