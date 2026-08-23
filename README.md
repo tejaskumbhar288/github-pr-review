@@ -82,6 +82,25 @@ on another. Note that free-tier
 prompts may be used to improve Google's models — fine for the public repos this
 is demoed on, not fine for proprietary code. That's what the Ollama path is for.
 
+### Running the App in containers
+
+`GITHUB_PRIVATE_KEY_PATH` is the convenient form for running on your own
+machine, but it does not survive containerisation: the image runs as an
+unprivileged uid, a bind-mounted key keeps its *host* ownership, and a key
+readable only by you is unreadable to the process that needs it. Chasing that
+with `chmod` trades a real secret's permissions for a deployment convenience.
+
+Use `GITHUB_PRIVATE_KEY` instead, holding the PEM on one line with `\n`
+escapes - `load_private_key()` accepts either. That is also the only form a
+platform like Fly or Render can give you, since they inject secrets as
+environment variables and have no filesystem to mount:
+
+```bash
+# Quote it: the PEM header contains spaces, so an unquoted value breaks
+# `set -a; . ./.env` and anything else that sources the file.
+python -c 'print("GITHUB_PRIVATE_KEY=\"" + open("key.pem").read().strip().replace(chr(10), "\\n") + "\"")' >> .env
+```
+
 ### Ollama (local, zero egress)
 
 ```bash

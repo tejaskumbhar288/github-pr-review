@@ -17,14 +17,6 @@ services:
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0
-      # env_file hands over the *host* path to the app's private key, which does
-      # not exist in here. Point at the mount instead; `environment` wins over
-      # `env_file`, so .env stays correct for running outside a container.
-      GITHUB_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
-    volumes:
-      # A directory, not the file: bind-mounting a file that may not exist fails
-      # the whole service, and the app is optional.
-      - ./secrets:/run/secrets:ro
     ports:
       - "8000:8000"
     depends_on:
@@ -43,14 +35,6 @@ services:
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0
-      # env_file hands over the *host* path to the app's private key, which does
-      # not exist in here. Point at the mount instead; `environment` wins over
-      # `env_file`, so .env stays correct for running outside a container.
-      GITHUB_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
-    volumes:
-      # A directory, not the file: bind-mounting a file that may not exist fails
-      # the whole service, and the app is optional.
-      - ./secrets:/run/secrets:ro
     depends_on:
       redis:
         condition: service_healthy
