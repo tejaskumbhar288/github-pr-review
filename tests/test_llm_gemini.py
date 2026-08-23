@@ -355,3 +355,41 @@ async def test_the_schema_carries_no_keyword_some_models_reject(provider):
 
     schema = _json.loads(route.calls[0].request.content)["generationConfig"]["responseSchema"]
     assert "maxItems" not in schema["properties"]["findings"]
+
+
+@respx.mock
+async def test_an_empty_recitation_response_is_retried(provider):
+    """RECITATION suppresses the output but not the request.
+
+    Seen on a fixture mid-run; the same case then scored 2/2 on both immediate
+    retries, so failing the review on the first one throws away a good answer.
+    """
+    route = respx.post(URL).mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={"candidates": [{"content": {"parts": []}, "finishReason": "RECITATION"}]},
+            ),
+            httpx.Response(200, json=ok_body()),
+        ]
+    )
+
+    result = await complete(provider)
+
+    assert route.call_count == 2
+    assert result.data == {"summary": "fine", "findings": []}
+
+
+@respx.mock
+async def test_a_safety_block_is_never_retried(provider):
+    """The one empty-text case that is a property of the content, not the draw."""
+    route = respx.post(URL).mock(
+        return_value=httpx.Response(
+            200, json={"candidates": [{"content": {"parts": []}, "finishReason": "SAFETY"}]}
+        )
+    )
+
+    with pytest.raises(LLMError, match="safety"):
+        await complete(provider)
+
+    assert route.call_count == 1

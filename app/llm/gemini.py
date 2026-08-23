@@ -248,12 +248,20 @@ def _extract_text(data: dict[str, Any]) -> str:
             f"{_token_breakdown(data)} - retrying; if this persists, "
             "lower MAX_FILES or CONTEXT_CHAR_LIMIT"
         )
+    # Terminal: a safety block is a decision about the content, so the next
+    # attempt reaches the same decision.
     if finish == "SAFETY":
         raise LLMError("gemini blocked the response on safety grounds")
 
     if text:
         return text
-    raise LLMError(f"gemini returned empty text (finishReason={finish})")
+
+    # Everything else that yields no text is the model failing to answer this
+    # time rather than a property of the request, so it is worth another go.
+    # RECITATION is the one seen in practice - Gemini suppresses output it
+    # believes reproduces training data - and it is plainly intermittent: the
+    # fixture that tripped it scored 2/2 on both immediate retries.
+    raise RateLimited(f"gemini returned empty text (finishReason={finish})")
 
 
 def _token_breakdown(data: dict[str, Any]) -> str:
