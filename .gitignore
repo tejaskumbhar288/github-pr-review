@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 *.pem
+secrets/*
+!secrets/.gitkeep
 
 # Python
 __pycache__/
