@@ -503,3 +503,28 @@ def test_a_same_model_diff_carries_no_warning():
     baseline = {"summary": {"provider": "gemini", "model": "gemini-3.6-flash", "detection": 0.0}}
 
     assert "WARNING" not in render_diff(current, baseline)
+
+
+def test_a_baseline_recorded_with_errors_is_called_out():
+    """Quota ran out mid-run and --out wrote the partial result as a baseline.
+
+    Its detection rate covered 3 of 4 cases, which would then have been the
+    number every later run was judged against.
+    """
+    from app.evals.harness import EvalReport, render_diff
+
+    current = EvalReport(provider="gemini", model="m")
+    baseline = {"summary": {"provider": "gemini", "model": "m", "detection": 0.83, "errors": 1}}
+
+    out = render_diff(current, baseline)
+
+    assert "errored" in out and "re-record" in out
+
+
+def test_a_clean_baseline_is_not_called_out():
+    from app.evals.harness import EvalReport, render_diff
+
+    current = EvalReport(provider="gemini", model="m")
+    baseline = {"summary": {"provider": "gemini", "model": "m", "detection": 0.0, "errors": 0}}
+
+    assert "re-record" not in render_diff(current, baseline)

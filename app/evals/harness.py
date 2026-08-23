@@ -310,6 +310,16 @@ def render_diff(current: EvalReport, baseline: dict[str, Any]) -> str:
     # tool reports "detection worse" for a prompt that never changed, because
     # the baseline was recorded on a different model - and free-tier quotas
     # make switching models the normal way to keep working.
+    # A baseline recorded from a run that errored is worse than no baseline:
+    # its rates cover only the cases that survived, so every later comparison
+    # is against a number that never described the whole suite.
+    if base.get("errors"):
+        lines.insert(
+            1,
+            f"WARNING: the baseline itself was recorded with {base['errors']} errored "
+            "case(s), so its rates describe only part of the suite - re-record it",
+        )
+
     was = f"{base.get('provider', '?')}/{base.get('model', '?')}"
     now = f"{current.provider}/{current.model}"
     if was != now:

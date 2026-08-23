@@ -1,0 +1,55 @@
+# Fly deployment: the same two processes as docker-compose, minus the Redis,
+# which comes from a managed provider rather than a container here.
+#
+#   fly launch --no-deploy --copy-config
+#   fly secrets set GEMINI_API_KEY=... GITHUB_WEBHOOK_SECRET=... \
+#                   GITHUB_APP_ID=... REDIS_URL=... \
+#                   GITHUB_PRIVATE_KEY="$(python -c 'print(open("secrets/github-app.pem").read().strip().replace(chr(10), chr(92)+"n"))')"
+#   fly deploy
+#
+# Then point the App's webhook at https://<app>.fly.dev/webhook - the same
+# PATCH /app/hook/config call used for the tunnel.
+
+app = "senior-review-bot"
+primary_region = "bom"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[processes]
+  api = "python -m uvicorn app.server.app:create_app --factory --host 0.0.0.0 --port 8000"
+  worker = "python -m app.server.worker"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  processes = ["api"]
+
+  # Deliberately not scale-to-zero. A webhook arrives unannounced and GitHub
+  # gives the endpoint ~10s before it records a failed delivery, so a cold
+  # start is a dropped review rather than a slow one. This is the same reason
+  # a sleeping free tier is the wrong host for a receiver.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "15s"
+    method = "GET"
+    # /healthz is liveness only. /readyz also touches Redis, which would take
+    # the receiver out of rotation during a blip when it can still accept and
+    # queue - so the check that decides routing is the shallower one.
+    path = "/healthz"
+    timeout = "5s"
+
+# The worker holds no ports; it is only ever a queue consumer.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  processes = ["api"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  processes = ["worker"]
