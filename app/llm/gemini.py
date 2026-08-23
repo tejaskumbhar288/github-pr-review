@@ -23,6 +23,13 @@ from .base import (
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 
+# Set explicitly rather than inherited: the per-model default varies, and on
+# models that think before answering the reasoning is charged to the same
+# budget, so a review with many findings can be cut off mid-JSON on one model
+# and finish comfortably on another. A review that needs more than this is
+# already too large to post.
+MAX_OUTPUT_TOKENS = 8192
+
 # Response schema enforced server-side. Native structured output is far more
 # reliable than describing the shape in the prompt and hoping.
 RESPONSE_SCHEMA: dict[str, Any] = {
@@ -90,6 +97,7 @@ class GeminiProvider(LLMProvider):
                 "temperature": temperature,
                 "responseMimeType": "application/json",
                 "responseSchema": RESPONSE_SCHEMA,
+                "maxOutputTokens": MAX_OUTPUT_TOKENS,
             },
         }
 
@@ -223,7 +231,8 @@ def _extract_text(data: dict[str, Any]) -> str:
     # not return JSON" - hiding the one cause the caller can actually act on.
     if finish == "MAX_TOKENS":
         raise LLMError(
-            "gemini hit the output token limit mid-response - lower MAX_FILES or CONTEXT_CHAR_LIMIT"
+            f"gemini hit the {MAX_OUTPUT_TOKENS}-token output limit mid-response"
+            f"{_token_breakdown(data)} - lower MAX_FILES or CONTEXT_CHAR_LIMIT"
         )
     if finish == "SAFETY":
         raise LLMError("gemini blocked the response on safety grounds")
@@ -231,3 +240,23 @@ def _extract_text(data: dict[str, Any]) -> str:
     if text:
         return text
     raise LLMError(f"gemini returned empty text (finishReason={finish})")
+
+
+def _token_breakdown(data: dict[str, Any]) -> str:
+    """Say where the output budget went.
+
+    Worth the few lines: on models that think before answering, the reasoning
+    is charged to the same budget, so "thinking=8100, answer=92" and
+    "answer=8192" call for completely different fixes.
+    """
+    meta = data.get("usageMetadata") or {}
+    spent = ", ".join(
+        f"{label}={meta[key]}"
+        for key, label in (
+            ("thoughtsTokenCount", "thinking"),
+            ("candidatesTokenCount", "answer"),
+            ("promptTokenCount", "prompt"),
+        )
+        if meta.get(key)
+    )
+    return f" ({spent})" if spent else ""

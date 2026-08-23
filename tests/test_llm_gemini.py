@@ -12,7 +12,7 @@ import pytest
 import respx
 
 from app.llm.base import LLMError, RateLimited
-from app.llm.gemini import BASE, GeminiProvider
+from app.llm.gemini import BASE, MAX_OUTPUT_TOKENS, GeminiProvider
 
 MODEL = "gemini-3.6-flash"
 URL = f"{BASE}/models/{MODEL}:generateContent"
@@ -235,7 +235,7 @@ async def test_truncated_json_is_reported_as_truncation_not_as_bad_json(provider
         )
     )
 
-    with pytest.raises(LLMError, match="output token limit"):
+    with pytest.raises(LLMError, match="output limit mid-response"):
         await complete(provider)
 
 
@@ -254,3 +254,41 @@ async def test_a_safety_block_with_partial_text_is_still_a_safety_block(provider
 
     with pytest.raises(LLMError, match="safety"):
         await complete(provider)
+
+
+@respx.mock
+async def test_the_truncation_error_says_where_the_budget_went(provider):
+    """thinking=8100/answer=92 and answer=8192 need different fixes."""
+    respx.post(URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {"content": {"parts": [{"text": '{"summ'}]}, "finishReason": "MAX_TOKENS"}
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 1336,
+                    "candidatesTokenCount": 6451,
+                    "thoughtsTokenCount": 1725,
+                },
+            },
+        )
+    )
+
+    with pytest.raises(LLMError) as exc:
+        await complete(provider)
+
+    assert "thinking=1725" in str(exc.value)
+    assert "answer=6451" in str(exc.value)
+
+
+@respx.mock
+async def test_the_output_budget_is_sent_explicitly(provider):
+    route = respx.post(URL).mock(return_value=httpx.Response(200, json=ok_body()))
+
+    await complete(provider)
+
+    import json as _json
+
+    sent = _json.loads(route.calls[0].request.content)
+    assert sent["generationConfig"]["maxOutputTokens"] == MAX_OUTPUT_TOKENS
