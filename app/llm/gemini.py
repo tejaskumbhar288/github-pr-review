@@ -215,15 +215,19 @@ def _extract_text(data: dict[str, Any]) -> str:
     candidate = candidates[0]
     parts = (candidate.get("content") or {}).get("parts") or []
     text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
-    if text:
-        return text
-
     finish = candidate.get("finishReason", "unknown")
+
+    # Check why the model stopped *before* trusting the text. A truncated
+    # response usually still carries most of its JSON, so returning it here
+    # sent half an object to the parser, which could only report "model did
+    # not return JSON" - hiding the one cause the caller can actually act on.
     if finish == "MAX_TOKENS":
         raise LLMError(
-            "gemini hit the output token limit before emitting any JSON - "
-            "lower MAX_FILES or CONTEXT_CHAR_LIMIT"
+            "gemini hit the output token limit mid-response - lower MAX_FILES or CONTEXT_CHAR_LIMIT"
         )
     if finish == "SAFETY":
         raise LLMError("gemini blocked the response on safety grounds")
+
+    if text:
+        return text
     raise LLMError(f"gemini returned empty text (finishReason={finish})")

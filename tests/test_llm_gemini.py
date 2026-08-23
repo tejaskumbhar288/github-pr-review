@@ -213,3 +213,44 @@ async def _first_attempt(provider: GeminiProvider, seen: list[float | None]) -> 
         await provider.complete_json(system="s", user="u")
     finally:
         mod.with_backoff = original
+
+
+@respx.mock
+async def test_truncated_json_is_reported_as_truncation_not_as_bad_json(provider):
+    """The failure mode that actually happens: MAX_TOKENS *with* partial text.
+
+    The model emits most of its object before the limit bites, so the text is
+    non-empty and looks parseable-ish. Reporting that as "did not return JSON"
+    points at the wrong problem.
+    """
+    half = '{"summary": "long", "findings": [{"file": "io/exporte'
+    respx.post(URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {"content": {"parts": [{"text": half}]}, "finishReason": "MAX_TOKENS"}
+                ]
+            },
+        )
+    )
+
+    with pytest.raises(LLMError, match="output token limit"):
+        await complete(provider)
+
+
+@respx.mock
+async def test_a_safety_block_with_partial_text_is_still_a_safety_block(provider):
+    respx.post(URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {"content": {"parts": [{"text": "I cannot"}]}, "finishReason": "SAFETY"}
+                ]
+            },
+        )
+    )
+
+    with pytest.raises(LLMError, match="safety"):
+        await complete(provider)
