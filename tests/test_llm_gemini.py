@@ -12,7 +12,7 @@ import pytest
 import respx
 
 from app.llm.base import LLMError, RateLimited
-from app.llm.gemini import BASE, MAX_OUTPUT_TOKENS, GeminiProvider
+from app.llm.gemini import BASE, MAX_FINDINGS, MAX_OUTPUT_TOKENS, GeminiProvider
 
 MODEL = "gemini-3.6-flash"
 URL = f"{BASE}/models/{MODEL}:generateContent"
@@ -292,3 +292,16 @@ async def test_the_output_budget_is_sent_explicitly(provider):
 
     sent = _json.loads(route.calls[0].request.content)
     assert sent["generationConfig"]["maxOutputTokens"] == MAX_OUTPUT_TOKENS
+
+
+@respx.mock
+async def test_the_findings_array_is_bounded_server_side(provider):
+    """An unbounded array is an invitation to run away, and it accepted."""
+    route = respx.post(URL).mock(return_value=httpx.Response(200, json=ok_body()))
+
+    await complete(provider)
+
+    import json as _json
+
+    schema = _json.loads(route.calls[0].request.content)["generationConfig"]["responseSchema"]
+    assert schema["properties"]["findings"]["maxItems"] == MAX_FINDINGS

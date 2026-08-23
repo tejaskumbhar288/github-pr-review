@@ -19,4 +19,3 @@ htmlcov/
 
 # Eval output
 evals/results*.json
-evals/cases.live.json

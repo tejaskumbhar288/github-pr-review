@@ -1,0 +1,112 @@
+{
+  "_comment": [
+    "Live cases: real pull requests, real bugs, verified against the PR's final",
+    "state rather than trusted from the review thread.",
+    "",
+    "Provenance matters here. Every expectation below was flagged by a maintainer",
+    "of the project during review, and then re-checked by reading the file at the",
+    "PR's head SHA - because a reviewer's line number goes stale the moment the",
+    "author pushes again. Three candidates were rejected for exactly that reason:",
+    "the author had already revised the code and the reported bug no longer",
+    "existed in the final diff.",
+    "",
+    "Rejected PRs are used deliberately. A merged PR has usually had its bug",
+    "fixed, so the defect is no longer in the diff; a PR that was closed unmerged",
+    "keeps the bug forever, which makes the case stable. The trap is that GitHub",
+    "cannot produce a diff once the contributor deletes their fork - so each PR",
+    "here was checked to still return files.",
+    "",
+    "Run:  python -m app.evals --cases evals/cases.live.json --verbose"
+  ],
+  "cases": [
+    {
+      "name": "httpx-unreachable-except",
+      "url": "https://github.com/encode/httpx/pull/453",
+      "description": "A new `except NewConnectionRequired` clause is placed after `except BaseException`, so it can never run.",
+      "expected": [
+        {
+          "file": "httpx/dispatch/connection_pool.py",
+          "line": 128,
+          "window": 6,
+          "description": "except NewConnectionRequired is dead code - the preceding except BaseException catches it first",
+          "keywords": [
+            "unreachable",
+            "never",
+            "dead",
+            "shadow",
+            "baseexception",
+            "order",
+            "before",
+            "first"
+          ],
+          "min_severity": "major"
+        }
+      ]
+    },
+    {
+      "name": "httpx-typo-and-missing-return",
+      "url": "https://github.com/encode/httpx/pull/647",
+      "description": "Stream-ID exhaustion handler misspells the attribute it resets and drops the result of its recursive retry.",
+      "expected": [
+        {
+          "file": "httpx/dispatch/http2.py",
+          "line": 74,
+          "window": 2,
+          "description": "assigns self.init_stated instead of self.init_started, so the flag is never actually reset",
+          "keywords": [
+            "init_stated",
+            "typo",
+            "misspell",
+            "misspelt",
+            "mistyped"
+          ],
+          "min_severity": "major"
+        },
+        {
+          "file": "httpx/dispatch/http2.py",
+          "line": 75,
+          "window": 3,
+          "description": "recursive send() result is discarded, so execution falls through to an unbound stream_id",
+          "keywords": [
+            "return",
+            "unbound",
+            "stream_id",
+            "falls through",
+            "discard",
+            "ignored"
+          ],
+          "min_severity": "major"
+        }
+      ]
+    },
+    {
+      "name": "urllib3-decoded-buffer-leak",
+      "url": "https://github.com/urllib3/urllib3/pull/3647",
+      "description": "read(amt=None) drains the decoded buffer without the decode_content guard the sized path has, mixing decoded and raw bytes.",
+      "expected": [
+        {
+          "file": "src/urllib3/response.py",
+          "line": 989,
+          "window": 4,
+          "description": "amt-is-None path prepends _decoded_buffer regardless of decode_content, unlike the else branch which raises",
+          "keywords": [
+            "decode_content",
+            "_decoded_buffer",
+            "decoded",
+            "raw",
+            "mix",
+            "guard",
+            "inconsistent"
+          ],
+          "min_severity": "major"
+        }
+      ]
+    },
+    {
+      "name": "urllib3-clean-typo-fix",
+      "url": "https://github.com/urllib3/urllib3/pull/2838",
+      "description": "Corrects HTTResponse -> HTTPResponse in two deprecation warnings. Touches real source, changes no behaviour. Every finding here is a false positive.",
+      "expected": []
+    }
+  ]
+}

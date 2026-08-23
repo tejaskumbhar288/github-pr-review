@@ -185,10 +185,24 @@ they can gate a prompt change in CI:
 python -m app.evals --fixtures-only --min-detection 0.6 --max-drop-rate 0.2
 ```
 
-Live cases against real PRs use the same scoring; copy
-`evals/cases.live.example.json` and fill in PRs whose bugs you have personally
-verified. A wrong expected line number scores a correct review as a miss and
-sends you optimising in the wrong direction, so don't guess them.
+Live cases against real PRs use the same scoring and live in
+`evals/cases.live.json`, which is committed so the claims in it can be checked.
+A wrong expected line number scores a correct review as a miss and sends you
+optimising in the wrong direction, so none of them are guessed:
+
+- Every expectation was raised by a **maintainer of the project** in review, then
+  re-verified by reading the file at the PR's head SHA. A reviewer's line number
+  goes stale the moment the author pushes again, and three otherwise-good
+  candidates were dropped for exactly that reason - the author had already
+  revised the code, so the reported bug was no longer in the final diff.
+- The PRs are **closed unmerged** on purpose. A merged PR has usually had its bug
+  fixed before merge, so the defect is gone from the diff; a rejected one keeps
+  it forever, which is what makes the case reproducible. The catch is that GitHub
+  cannot produce a diff at all once the contributor deletes their fork, so each
+  PR was checked to still return files.
+- One case is **clean by construction** - a two-line typo fix in a deprecation
+  warning. It expects nothing, so every finding on it is a false positive. Without
+  a case like that the suite only measures detection and never noise.
 
 The committed baseline (`evals/baseline.json`, `gemini-3.6-flash`):
 

@@ -23,12 +23,24 @@ from .base import (
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-# Set explicitly rather than inherited: the per-model default varies, and on
-# models that think before answering the reasoning is charged to the same
-# budget, so a review with many findings can be cut off mid-JSON on one model
-# and finish comfortably on another. A review that needs more than this is
-# already too large to post.
-MAX_OUTPUT_TOKENS = 8192
+# Set explicitly rather than inherited, because the per-model default varies
+# and a review that finishes on one model should not be truncated on another.
+#
+# The size is deliberate. Reasoning is charged to this same budget, and on real
+# pull requests it dominates: measured spends of thinking=6745/answer=1432 and
+# thinking=7860/answer=317 against an 8192 cap, where the answer had plenty of
+# room and the thinking had none. Sizing this to the length of a review is
+# therefore the wrong instinct - it has to cover the model's reasoning about a
+# diff it has never seen, which scales with the diff, not with the verdict.
+MAX_OUTPUT_TOKENS = 32768
+
+# A review is allowed this many findings. The cap is not about taste - an
+# unbounded array lets the model keep generating, and it does: on two real PRs
+# it ran to answer=28411 and answer=24301 tokens once the output budget was
+# raised enough to let it. Bounding the array server-side stops the runaway at
+# the source, and a review carrying more than this many findings was never
+# going to be read anyway.
+MAX_FINDINGS = 25
 
 # Response schema enforced server-side. Native structured output is far more
 # reliable than describing the shape in the prompt and hoping.
@@ -38,6 +50,7 @@ RESPONSE_SCHEMA: dict[str, Any] = {
         "summary": {"type": "string"},
         "findings": {
             "type": "array",
+            "maxItems": MAX_FINDINGS,
             "items": {
                 "type": "object",
                 "properties": {
