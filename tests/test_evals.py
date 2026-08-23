@@ -481,3 +481,25 @@ def test_the_error_warning_says_the_numbers_are_partial():
         CaseReport(name="boom", kind="fixture", error="boom"),
     )
     assert "excluded from every number" in render_report(report)
+
+
+def test_a_diff_across_models_says_so():
+    """Free-tier quotas make model-hopping routine; a silent diff would lie."""
+    from app.evals.harness import EvalReport, render_diff
+
+    current = EvalReport(provider="gemini", model="gemini-3.7-flash")
+    baseline = {"summary": {"provider": "gemini", "model": "gemini-3.6-flash", "detection": 0.83}}
+
+    out = render_diff(current, baseline)
+
+    assert "gemini-3.6-flash" in out and "gemini-3.7-flash" in out
+    assert "not a prompt change" in out
+
+
+def test_a_same_model_diff_carries_no_warning():
+    from app.evals.harness import EvalReport, render_diff
+
+    current = EvalReport(provider="gemini", model="gemini-3.6-flash")
+    baseline = {"summary": {"provider": "gemini", "model": "gemini-3.6-flash", "detection": 0.0}}
+
+    assert "WARNING" not in render_diff(current, baseline)

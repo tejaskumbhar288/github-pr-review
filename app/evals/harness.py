@@ -295,6 +295,19 @@ def render_diff(current: EvalReport, baseline: dict[str, Any]) -> str:
         ("noise_per_case", current.noise_per_case, base.get("noise_per_case", 0.0), "down"),
     ]
     lines = ["", "vs baseline:", f"{'metric':<18} {'baseline':>10} {'current':>10} {'delta':>10}"]
+
+    # A diff is only meaningful if the model is held fixed. Without this the
+    # tool reports "detection worse" for a prompt that never changed, because
+    # the baseline was recorded on a different model - and free-tier quotas
+    # make switching models the normal way to keep working.
+    was = f"{base.get('provider', '?')}/{base.get('model', '?')}"
+    now = f"{current.provider}/{current.model}"
+    if was != now:
+        lines.insert(
+            1,
+            f"WARNING: baseline was recorded on {was}, this run is {now} - "
+            "the deltas below measure the model change, not a prompt change",
+        )
     verdict_bits = []
     for name, cur, prev, better in rows:
         delta = cur - prev
