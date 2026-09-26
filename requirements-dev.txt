@@ -3,3 +3,8 @@ pytest>=8.0
 pytest-asyncio>=0.24
 respx>=0.21
 ruff>=0.6
+# Second opinion in the static pre-pass. Optional at runtime - the analyzer
+# degrades to ruff alone when it is absent - but installed here so the eval
+# numbers are recorded with it present. Adding it shifts detections toward
+# "by linter", so a baseline recorded without it is not comparable.
+semgrep>=1.90

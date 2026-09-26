@@ -127,7 +127,11 @@ python -m app.cli <url> --json             # machine-readable, for CI
 python -m app.cli <url> --metrics          # include the metrics block
 python -m app.cli <url> --provider ollama  # override the backend
 python -m app.cli <url> --no-context       # diffs only, for a token-cost comparison
+python -m app.cli <url> --repo-context     # also pull in callers of what changed
+python -m app.cli <url> --full             # re-read the whole PR, not just new commits
 python -m app.cli <url> --fail-on any      # exit 1 on any finding, not just critical
+
+python -m app.review.resolution <url>      # what happened to the comments we posted
 ```
 
 Exit codes: `0` clean · `1` findings at the `--fail-on` threshold · `2` bad
@@ -276,6 +280,9 @@ app/
   review/
     prompt.py           system prompt + context assembly
     analysis.py         ruff/semgrep pre-pass -> "known issues"
+    incremental.py      narrow a re-push to the commits we have not read
+    repo_context.py     find the callers of what changed
+    resolution.py       what the author did about what we said
     engine.py           orchestration, validation, metrics
   server/
     security.py         HMAC-SHA256 webhook verification
@@ -291,8 +298,15 @@ app/
     harness.py          scoring, reporting, baseline comparison
 evals/
   cases.json            the offline suite
+  cases.live.json       real PRs with maintainer-confirmed bugs
+  baseline.json         the recorded offline run to compare against
+  baseline.live.json    the recorded live run
   fixtures/             hand-written diffs with planted bugs
-tests/                  226 offline tests + 25 Redis integration tests
+docs/
+  bugs.md               the defects found building this, and what they share
+scripts/
+  deploy-fly.sh         secrets, deploy, and the webhook repoint in one command
+tests/                  326 offline tests + 25 Redis integration tests
 ```
 
 ## Design notes
@@ -376,18 +390,25 @@ Verified end to end against a real PR, a real model and real infrastructure:
 | Redis queue | real server: `SET NX` under a 25-way race, orphan recovery |
 | Dead-letter queue | real server: fail -> dead-letter -> `make dlq` -> requeue |
 | Docker | image builds, container serves, degrades without Redis |
-| Eval suite | 83% detection, 0 noise, 0.0 drop rate against `gemini-3.6-flash` |
+| Eval suite | offline: 100% detection (6/6), 0 noise, 0.0 drop rate on `gemini-3.6-flash` |
+| Live eval suite | 4 real PRs, 0 errors: 75% detection (3/4), 0 noise, 0.0 drop rate, and the clean-by-construction case correctly silent |
 | Ollama | full eval suite on a local `llama3.2:3b`: 50% detection, drop rate 0.0 |
 | semgrep | real binary, real rules: 2 findings on the SQL-injection fixture |
 | Langfuse | real project: span + generation + event nested, `drop_rate` scored |
+| GitHub App auth | real App: JWT accepted by `GET /app`, exchanged for a `ghs_` token, second call served from cache in 0.01ms |
+| Posted review | `senior-review-bot[bot]` on a real PR: 81.8s, 2 findings, both true, 0 false positives |
+| Incremental review | end to end through the real pipeline: a re-push reviews only the new commits, `--full` overrides, and new commits touching nothing reviewable spend no model request |
+| Test-path noise | on the first live run afterwards: 6 irrelevant lint findings removed from one real PR, 2 from another |
 
-Not yet exercised against reality: the GitHub App token exchange, which needs an
-App to exist.
+The one path not exercised against reality is the Fly deployment, which needs an
+account rather than code: `scripts/deploy-fly.sh` automates everything after
+`fly auth login`, and the image it would deploy is verified locally — it builds,
+imports the app, resolves ruff, and answers `/healthz` with a 200.
 
 ## Testing
 
 ```bash
-make test                                              # 226 offline tests
+make test                                              # 326 offline tests
 REDIS_TEST_URL=redis://localhost:6379/0 make test      # + 25 against real Redis
 ```
 
@@ -402,11 +423,65 @@ fork's PR is never given, so it is guarded rather than left to fail: set
 
 ## Roadmap
 
-All six planned steps are implemented, plus the dead-letter queue. What's next:
+All six planned steps are implemented, plus the dead-letter queue and all three
+follow-ups.
 
-1. **Incremental review.** Review only the commits added since the last review
-   of the same PR, instead of the whole diff again on every push.
-2. **Repo-aware context.** Pull the callers of a changed function, not just the
-   file it lives in. The retrieval question this opens is the interesting part.
-3. **Comment resolution.** Track which findings the author addressed, and use
-   that as a real-world precision signal to feed back into the evals.
+### 1. Incremental review — shipped
+
+A PR is reviewed on every push. Without this the second push re-reviews the
+first push's code, which costs a full model request against a 20/day free tier
+and re-raises findings the author has already read and either fixed or decided
+against. Re-raising them is how a bot teaches people to stop reading it.
+
+`review/incremental.py` narrows the diff to the commits added since our last
+review, found through the SHA in our own review marker. It is used **only** when
+GitHub reports the head is a fast-forward of that commit: after a rebase or a
+force-push the two have diverged and the diff between them mixes new work with
+rewritten history, so the whole PR is re-read instead. No prior review, a failed
+compare, or a deleted base commit all fall back the same way, which means the
+worst case is exactly the old behaviour.
+
+The scope is stated in the posted review, above the summary — a reader who does
+not know a review covered two commits will read "no blocking issues found" as a
+verdict on the whole PR. New commits that touch nothing reviewable (a merge from
+main, a lockfile bump) post nothing and spend no model request.
+
+### 2. Repo-aware context — shipped, off by default
+
+Whole-file context tells the model what a changed function *is*. It cannot tell
+it what the function is *for*, and that is where the expensive bugs live: a
+signature that gained a parameter, a return that can now be `None`. Each is
+locally defensible and breaks a caller three files away.
+
+`review/repo_context.py` parses the changed files, works out which definitions
+the diff touched, and searches the repo for their call sites — ranking a changed
+*signature* above a changed body, because a new function has no callers to break
+while a new signature on an existing name is precisely the change that breaks
+them. Call sites arrive as numbered windows, not whole files.
+
+Lexical search rather than embeddings, deliberately: a call site is found by an
+exact identifier, which is the one query lexical search answers perfectly. There
+is no index to build and no way for the retrieval to be quietly stale.
+
+**Off by default**, and that is a budget decision rather than a quality one:
+GitHub's code search is 30 requests/minute across the whole account, so a busy
+webhook install would starve its own queue. `--repo-context` turns it on for a
+single review; `REPO_CONTEXT=1` for an install quiet enough to afford it.
+
+### 3. Comment resolution — shipped
+
+`python -m app.review.resolution <url>` reports what happened to every inline
+comment this bot has posted on a PR: `addressed` (the line we anchored to has
+changed since), `acknowledged` (a reply or a positive reaction), `disputed` (a
+👎), or `open`. Comments are identified through the marker in our own reviews
+rather than by author login, so the history survives a move from a PAT to a
+GitHub App.
+
+The headline number **ignores `open` entirely** and reports only the ratio among
+comments that drew some response, because silence is not rejection — most open
+comments are on PRs nobody has revisited. It reports `None` rather than 100%
+when nothing has drawn a response yet. It is a weak signal read honestly, which
+is worth more than a strong one read wrongly.
+
+`--record` accumulates reports across PRs into `evals/resolution.json`, weighted
+by comment rather than by PR; `--summary` prints the aggregate.

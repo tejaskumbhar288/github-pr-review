@@ -15,6 +15,7 @@ def build_provider(settings: Settings) -> LLMProvider:
             api_key=settings.gemini_api_key or "",
             model=settings.gemini_model,
             max_retries=settings.max_retries,
+            max_sampling_retries=settings.max_sampling_retries,
             timeout=settings.request_timeout,
         )
     return OllamaProvider(
@@ -22,6 +23,7 @@ def build_provider(settings: Settings) -> LLMProvider:
         model=settings.ollama_model,
         # Local retries are expensive in wall-clock time; cap them lower.
         max_retries=min(settings.max_retries, 3),
+        max_sampling_retries=settings.max_sampling_retries,
         num_ctx=settings.ollama_num_ctx,
         timeout=max(settings.request_timeout, 600.0),
     )

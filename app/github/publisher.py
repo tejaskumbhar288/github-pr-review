@@ -10,6 +10,7 @@ whole result.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +34,15 @@ MAX_INLINE_COMMENTS = 50
 
 
 @dataclass
+class PriorReview:
+    """One review we posted previously, and the commit it described."""
+
+    sha: str
+    review_id: int = 0
+    submitted_at: str = ""
+
+
+@dataclass
 class PublishResult:
     posted: bool
     review_id: int | None = None
@@ -45,6 +55,18 @@ class PublishResult:
 
 def marker_for(head_sha: str) -> str:
     return f"<!-- {MARKER}:{head_sha} -->"
+
+
+# Deliberately not `[0-9a-f]{40}`: the marker holds whatever ref we reviewed,
+# and tightening this to real SHAs would quietly stop recognising our own
+# reviews the first time something hands us a short SHA or a tag.
+_MARKER_RE = re.compile(rf"<!--\s*{re.escape(MARKER)}:([^\s>]{{4,64}})\s*-->")
+
+
+def _marked_sha(body: str) -> str | None:
+    """Pull the reviewed commit out of a review body, if we wrote it."""
+    match = _MARKER_RE.search(body or "")
+    return match.group(1) if match else None
 
 
 def format_finding(f: Finding) -> str:
@@ -67,6 +89,17 @@ def build_body(pr: PullRequest, result: ReviewResult, *, degraded: bool = False)
         marker_for(pr.head_sha),
         "## 🤖 AI code review",
         "",
+    ]
+    # Scope goes above the summary, not in the footer. A reader who does not
+    # know the review covered two commits rather than the whole PR will read
+    # "no blocking issues found" as a verdict on the whole PR.
+    if pr.is_incremental:
+        lines += [
+            f"_Incremental review: the {pr.new_commits} commit(s) pushed since "
+            f"`{pr.incremental_base[:7]}`. Earlier commits were reviewed above._",
+            "",
+        ]
+    lines += [
         result.summary or "_No summary returned._",
         "",
     ]
@@ -119,21 +152,56 @@ class ReviewPublisher:
         self._gh = gh
         self._event = event
 
-    async def already_reviewed(self, pr: PullRequest) -> bool:
-        """Has this exact head_sha already been reviewed by us?
+    async def review_history(self, pr: PullRequest) -> list[PriorReview]:
+        """Our own past reviews of this PR, oldest first.
 
-        Cheap protection against duplicate reviews when a webhook is redelivered
-        or the CLI is re-run; the queue's idempotency key is the primary guard.
+        One request answers two questions - "did we already review this commit?"
+        and "what was the last commit we did review?" - so they share a call
+        rather than each paying for one. The marker carries the SHA, which is
+        why the answer survives a token swap or a move from a PAT to an App:
+        it never has to work out which account posted the review.
         """
-        marker = marker_for(pr.head_sha)
         try:
             reviews = await self._gh.get_json(
                 f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/reviews", per_page=100
             )
         except GitHubError as exc:
             log.warning("could not list existing reviews: %s", exc)
-            return False
-        return any(marker in (r.get("body") or "") for r in reviews or [])
+            return []
+
+        history: list[PriorReview] = []
+        for r in reviews or []:
+            sha = _marked_sha(r.get("body") or "")
+            if sha is None:
+                continue
+            history.append(
+                PriorReview(
+                    sha=sha,
+                    review_id=int(r.get("id") or 0),
+                    submitted_at=str(r.get("submitted_at") or ""),
+                )
+            )
+        return history
+
+    async def already_reviewed(self, pr: PullRequest) -> bool:
+        """Has this exact head_sha already been reviewed by us?
+
+        Cheap protection against duplicate reviews when a webhook is redelivered
+        or the CLI is re-run; the queue's idempotency key is the primary guard.
+        """
+        return any(r.sha == pr.head_sha for r in await self.review_history(pr))
+
+    async def last_reviewed_sha(self, pr: PullRequest) -> str | None:
+        """The most recent commit of this PR we have already reviewed, if any.
+
+        Ordered by GitHub's own submission order rather than by our marker,
+        because the marker records which commit a review was *about* and gives
+        no ordering of its own. Reviews at the current head are ignored: the
+        caller wants a starting point for what is new, and "new since head" is
+        empty by definition.
+        """
+        prior = [r for r in await self.review_history(pr) if r.sha != pr.head_sha]
+        return prior[-1].sha if prior else None
 
     async def publish(
         self,

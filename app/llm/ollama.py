@@ -15,6 +15,7 @@ from .base import (
     LLMProvider,
     LLMResponse,
     RateLimited,
+    SamplingFailure,
     TokenUsage,
     parse_json_payload,
     with_backoff,
@@ -32,10 +33,12 @@ class OllamaProvider(LLMProvider):
         num_ctx: int = 16384,
         timeout: float = 600.0,
         client: httpx.AsyncClient | None = None,
+        max_sampling_retries: int = 2,
     ):
         self._host = host.rstrip("/")
         self.model = model
         self._max_retries = max_retries
+        self._max_sampling_retries = max_sampling_retries
         self._num_ctx = num_ctx
         self._owns_client = client is None
         # Local generation on modest hardware is slow; be patient.
@@ -55,7 +58,7 @@ class OllamaProvider(LLMProvider):
             ],
         }
 
-        async def _call() -> dict[str, Any]:
+        async def _call() -> tuple[dict[str, Any], str]:
             try:
                 resp = await self._client.post(f"{self._host}/api/chat", json=payload)
             except httpx.ConnectError as exc:
@@ -74,13 +77,24 @@ class OllamaProvider(LLMProvider):
                 raise RateLimited(f"ollama {resp.status_code}")
             if resp.status_code >= 400:
                 raise LLMError(f"ollama {resp.status_code}: {resp.text[:400]}")
-            return resp.json()
 
-        outcome = await with_backoff(_call, max_retries=self._max_retries)
-        data = outcome.value
-        content = (data.get("message") or {}).get("content", "")
-        if not content:
-            raise LLMError("ollama returned an empty message")
+            # Extract inside the retried call, not after it - the same shape of
+            # bug the Gemini path had. A local model that returns nothing has
+            # failed to sample, not failed the request, and the next draw is
+            # usually fine. Checking it out here made an empty message fail the
+            # whole review with no retry possible.
+            data = resp.json()
+            content = (data.get("message") or {}).get("content", "")
+            if not content:
+                raise SamplingFailure("ollama returned an empty message")
+            return data, content
+
+        outcome = await with_backoff(
+            _call,
+            max_retries=self._max_retries,
+            max_sampling_retries=self._max_sampling_retries,
+        )
+        data, content = outcome.value
 
         return LLMResponse(
             data=parse_json_payload(content),

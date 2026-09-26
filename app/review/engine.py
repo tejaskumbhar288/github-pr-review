@@ -16,6 +16,7 @@ from ..obs.metrics import ReviewMetrics
 from ..obs.tracing import Tracer
 from .analysis import StaticAnalyzer, StaticFinding
 from .prompt import SYSTEM, build_user_prompt
+from .repo_context import RepoContext, RepoContextBuilder
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +71,8 @@ class ReviewResult:
     dropped: list[str] = field(default_factory=list)
     """Findings rejected by validation, kept for observability."""
     known_issues: list[StaticFinding] = field(default_factory=list)
+    repo_context: RepoContext = field(default_factory=RepoContext)
+    """Callers pulled in from elsewhere in the repo; see review.repo_context."""
     metrics: ReviewMetrics = field(default_factory=ReviewMetrics)
 
     @property
@@ -92,12 +95,14 @@ class ReviewEngine:
         settings: Settings,
         tracer: Tracer | None = None,
         analyzer: StaticAnalyzer | None = None,
+        repo_context: RepoContextBuilder | None = None,
     ):
         self._gh = gh
         self._llm = llm
         self._settings = settings
         self._tracer = tracer or Tracer()
         self._analyzer = analyzer or StaticAnalyzer(settings)
+        self._repo_context = repo_context or RepoContextBuilder(gh, settings)
 
     async def review(self, owner: str, repo: str, number: int) -> ReviewResult:
         started = time.perf_counter()
@@ -145,14 +150,29 @@ class ReviewEngine:
             "pr-review", pr=pr.slug, head_sha=pr.head_sha, files=len(pr.files)
         ) as span:
             try:
+                # An offline caller supplying context is also saying "do not go
+                # to the network", so the caller expansion is skipped with it -
+                # not silently, but because there is no repo to search.
+                offline = context is not None
                 context = context if context is not None else await self._gather_context(pr)
                 metrics.context_files = len(context)
                 metrics.context_chars = sum(len(c) for c in context.values())
 
                 known_issues = await self._analyzer.analyze(pr, context)
                 metrics.static_findings = len(known_issues)
+                metrics.static_suppressed = self._analyzer.suppressed_count
 
-                user_prompt = build_user_prompt(pr, context, known_issues)
+                repo_context = (
+                    RepoContext(reason="offline")
+                    if offline
+                    else await self._repo_context.build(pr, context)
+                )
+                metrics.repo_context_files = repo_context.files
+                metrics.repo_context_searches = repo_context.searches
+                if repo_context.reason:
+                    log.debug("no caller context: %s", repo_context.reason)
+
+                user_prompt = build_user_prompt(pr, context, known_issues, repo_context)
                 metrics.prompt_chars = len(user_prompt) + len(SYSTEM)
 
                 generation = span.generation(
@@ -174,6 +194,7 @@ class ReviewEngine:
 
                 result = self._validate(pr, response.data, metrics)
                 result.known_issues = known_issues
+                result.repo_context = repo_context
             except Exception as exc:
                 metrics.error = f"{type(exc).__name__}: {exc}"
                 metrics.total_latency_ms = (time.perf_counter() - started) * 1000

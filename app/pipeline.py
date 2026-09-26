@@ -19,6 +19,7 @@ from .llm.factory import build_provider
 from .obs.metrics import ReviewMetrics
 from .obs.tracing import Tracer, build_tracer
 from .review.engine import ReviewEngine, ReviewResult
+from .review.incremental import IncrementalOutcome, narrow_to_new_commits
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ log = logging.getLogger(__name__)
 class ReviewOutcome:
     result: ReviewResult
     published: PublishResult | None = None
+    incremental: str = IncrementalOutcome.FULL
+    """Which of the incremental outcomes applied; see review.incremental."""
 
 
 class ReviewSession:
@@ -61,6 +64,7 @@ class ReviewSession:
         *,
         post: bool | None = None,
         skip_if_reviewed: bool = True,
+        incremental: bool | None = None,
     ) -> ReviewOutcome:
         pr = await self.gh.fetch_pr(
             owner,
@@ -69,7 +73,9 @@ class ReviewSession:
             max_files=self.settings.max_files,
             max_patch_lines=self.settings.max_patch_lines,
         )
-        return await self.run_pr(pr, post=post, skip_if_reviewed=skip_if_reviewed)
+        return await self.run_pr(
+            pr, post=post, skip_if_reviewed=skip_if_reviewed, incremental=incremental
+        )
 
     async def run_pr(
         self,
@@ -77,33 +83,75 @@ class ReviewSession:
         *,
         post: bool | None = None,
         skip_if_reviewed: bool = True,
+        incremental: bool | None = None,
     ) -> ReviewOutcome:
         should_post = self.settings.post_reviews if post is None else post
+        use_incremental = self.settings.incremental_review if incremental is None else incremental
+
+        # One call answers both questions: whether this exact commit is already
+        # reviewed, and which commit we last reviewed. Asking separately paid
+        # for the same request twice.
+        history = await self.publisher.review_history(pr) if use_incremental else []
 
         # Check for an existing review *before* reasoning, not after. The
         # duplicate check used to run at publish time, so a redelivered webhook
         # burned a full review - tens of thousands of tokens and ~45s - only to
         # discard the result. The queue's reservation covers the common case;
         # this covers a queue miss, a manual re-run, and a second worker.
-        if should_post and skip_if_reviewed and await self.publisher.already_reviewed(pr):
-            log.info("%s already reviewed at this commit; skipping", pr.idempotency_key)
+        if should_post and skip_if_reviewed:
+            seen = (
+                any(r.sha == pr.head_sha for r in history)
+                if use_incremental
+                else await self.publisher.already_reviewed(pr)
+            )
+            if seen:
+                log.info("%s already reviewed at this commit; skipping", pr.idempotency_key)
+                return ReviewOutcome(
+                    result=ReviewResult(
+                        pr=pr,
+                        summary="Already reviewed at this commit.",
+                        metrics=ReviewMetrics(pr=pr.slug, head_sha=pr.head_sha),
+                    ),
+                    published=PublishResult(
+                        posted=False, skipped_reason="already reviewed at this commit"
+                    ),
+                )
+
+        mode = IncrementalOutcome.FULL
+        if use_incremental:
+            prior = [r for r in history if r.sha != pr.head_sha]
+            if prior:
+                pr, mode = await narrow_to_new_commits(self.gh, pr, prior[-1].sha, self.settings)
+
+        if mode == IncrementalOutcome.NOTHING_NEW:
+            # Deliberately not posted. A second review saying "nothing new" is
+            # noise on the PR, and it would consume a model request to produce.
+            log.info("%s: nothing new to review since %s", pr.slug, pr.incremental_base)
             return ReviewOutcome(
                 result=ReviewResult(
                     pr=pr,
-                    summary="Already reviewed at this commit.",
+                    summary=(
+                        f"No reviewable changes in the {pr.new_commits} commit(s) pushed "
+                        f"since the last review."
+                    ),
                     metrics=ReviewMetrics(pr=pr.slug, head_sha=pr.head_sha),
                 ),
                 published=PublishResult(
-                    posted=False, skipped_reason="already reviewed at this commit"
-                ),
+                    posted=False, skipped_reason="no reviewable changes since the last review"
+                )
+                if should_post
+                else None,
+                incremental=mode,
             )
 
         result = await self.engine.review_pr(pr)
         if not should_post:
-            return ReviewOutcome(result=result)
+            return ReviewOutcome(result=result, incremental=mode)
 
-        published = await self.publisher.publish(pr, result, skip_if_reviewed=skip_if_reviewed)
-        return ReviewOutcome(result=result, published=published)
+        # skip_if_reviewed is already settled above when the history was
+        # fetched; re-checking here would list the reviews a second time.
+        published = await self.publisher.publish(pr, result, skip_if_reviewed=False)
+        return ReviewOutcome(result=result, published=published, incremental=mode)
 
     async def close(self) -> None:
         if self._owns_gh:

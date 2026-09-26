@@ -7,6 +7,8 @@ real quota.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 import respx
@@ -393,3 +395,49 @@ async def test_a_safety_block_is_never_retried(provider):
         await complete(provider)
 
     assert route.call_count == 1
+
+
+async def test_a_truncated_response_is_re_rolled_at_a_higher_temperature(no_sleep):
+    """The retry has to differ from the attempt that failed, or it is just the
+    same near-deterministic decode a second time."""
+    sent: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append(body["generationConfig"]["temperature"])
+        if len(sent) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {
+                            "content": {"parts": [{"text": '{"summary": "part'}]},
+                            "finishReason": "MAX_TOKENS",
+                        }
+                    ],
+                    "usageMetadata": {"candidatesTokenCount": 30893},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {"parts": [{"text": '{"summary": "ok", "findings": []}'}]},
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5},
+            },
+        )
+
+    with respx.mock:
+        respx.post(url__regex=r".*generateContent").mock(side_effect=handler)
+        provider = GeminiProvider("k", "gemini-3.6-flash", max_retries=5)
+        out = await provider.complete_json(system="s", user="u", temperature=0.2)
+        await provider.close()
+
+    assert out.data["summary"] == "ok"
+    assert out.attempts == 2
+    assert sent[0] == 0.2, "the first attempt keeps the low review temperature"
+    assert sent[1] > sent[0], "the re-roll must be a genuinely new sample"

@@ -23,6 +23,11 @@ class ReviewMetrics:
     context_files: int = 0
     context_chars: int = 0
     static_findings: int = 0
+    static_suppressed: int = 0
+    """Lint findings dropped as structurally irrelevant to test code."""
+    repo_context_files: int = 0
+    """Files pulled in because they call something this PR changed."""
+    repo_context_searches: int = 0
 
     prompt_chars: int = 0
     prompt_tokens: int = 0
@@ -69,6 +74,9 @@ class ReviewMetrics:
             "context_files": self.context_files,
             "context_chars": self.context_chars,
             "static_findings": self.static_findings,
+            "static_suppressed": self.static_suppressed,
+            "repo_context_files": self.repo_context_files,
+            "repo_context_searches": self.repo_context_searches,
             "prompt_chars": self.prompt_chars,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,

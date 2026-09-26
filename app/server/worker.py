@@ -18,6 +18,7 @@ from ..github.auth import GitHubAppAuth, GitHubAuthError, load_private_key
 from ..obs.logging import setup_logging
 from ..obs.tracing import Tracer, build_tracer
 from ..pipeline import ReviewSession
+from ..review.analysis import StaticAnalyzer
 from .queue import POLL_TIMEOUT, JobQueue, RedisQueue, ReviewJob, build_queue
 
 log = logging.getLogger(__name__)
@@ -142,6 +143,19 @@ async def run_worker(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
     setup_logging(settings.log_level)
     settings.validate()
+
+    # Say which linters this process can actually reach. The container ships
+    # ruff but not semgrep - semgrep is a heavy dependency for a 512MB VM - so a
+    # containerised review is not identical to a local one. That is a defensible
+    # trade and an indefensible surprise, and the pre-pass degrades silently by
+    # design, so the difference has to be stated at startup rather than inferred
+    # later from a review that came back thinner than expected.
+    tools = StaticAnalyzer(settings).available_tools()
+    if settings.static_analysis:
+        log.info(
+            "static analysis pre-pass: %s",
+            ", ".join(sorted(tools)) if tools else "no linters found on PATH - ruff-less reviews",
+        )
 
     queue = await build_queue(settings)
     auth = build_auth(settings)

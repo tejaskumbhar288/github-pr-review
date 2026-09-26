@@ -33,8 +33,15 @@ def render(outcome: ReviewOutcome, *, color: bool = True, show_metrics: bool = F
     def c(code: str) -> str:
         return code if color else ""
 
+    scope = ""
+    if result.pr.is_incremental:
+        scope = (
+            f" — incremental: {result.pr.new_commits} commit(s) since "
+            f"{result.pr.incremental_base[:7]}"
+        )
+
     lines = [
-        f"\n{c(BOLD)}{result.pr.slug} — {result.pr.title}{c(RESET)}",
+        f"\n{c(BOLD)}{result.pr.slug} — {result.pr.title}{c(RESET)}{c(DIM)}{scope}{c(RESET)}",
         f"{c(DIM)}{len(result.pr.files)} file(s) reviewed"
         + (f", {result.pr.truncated_files} excluded" if result.pr.truncated_files else "")
         + (
@@ -68,6 +75,13 @@ def render(outcome: ReviewOutcome, *, color: bool = True, show_metrics: bool = F
                 indented = "\n".join(f"    {ln}" for ln in f.suggestion.splitlines())
                 lines.append(f"  {c(DIM)}suggested:{c(RESET)}\n{indented}")
             lines.append("")
+
+    if result.repo_context.call_sites:
+        lines.append(
+            f"{c(DIM)}{len(result.repo_context.call_sites)} call site(s) in "
+            f"{result.repo_context.files} file(s) pulled in for "
+            f"{', '.join(result.repo_context.symbols)}{c(RESET)}\n"
+        )
 
     if result.known_issues:
         lines.append(
@@ -110,10 +124,18 @@ def to_json(outcome: ReviewOutcome) -> str:
         {
             "pr": result.pr.slug,
             "head_sha": result.pr.head_sha,
+            "scope": outcome.incremental,
+            "incremental_base": result.pr.incremental_base,
             "summary": result.summary,
             "findings": [asdict(f) for f in result.findings],
             "dropped": result.dropped,
             "known_issues": [asdict(k) for k in result.known_issues],
+            "repo_context": {
+                "symbols": result.repo_context.symbols,
+                "files": result.repo_context.files,
+                "call_sites": len(result.repo_context.call_sites),
+                "reason": result.repo_context.reason,
+            },
             "metrics": result.metrics.as_dict(),
             "published": asdict(outcome.published) if outcome.published else None,
         },
@@ -139,6 +161,8 @@ def build_settings(args: argparse.Namespace) -> Settings:
         overrides["static_analysis"] = False
     if args.no_context:
         overrides["context_char_limit"] = 0
+    if args.repo_context:
+        overrides["repo_context"] = True
     if args.request_changes:
         overrides["review_event"] = "REQUEST_CHANGES"
     return settings.with_overrides(**overrides) if overrides else settings
@@ -151,7 +175,12 @@ async def run(args: argparse.Namespace) -> int:
 
     async with ReviewSession(settings) as session:
         outcome = await session.run(
-            owner, repo, number, post=args.post, skip_if_reviewed=not args.force
+            owner,
+            repo,
+            number,
+            post=args.post,
+            skip_if_reviewed=not args.force,
+            incremental=False if args.full else None,
         )
 
     if args.json:
@@ -185,6 +214,11 @@ def main() -> None:
         "--force", action="store_true", help="post even if this commit was already reviewed"
     )
     parser.add_argument(
+        "--full",
+        action="store_true",
+        help="review the whole PR even if we reviewed an earlier commit of it",
+    )
+    parser.add_argument(
         "--request-changes",
         action="store_true",
         help="post as REQUEST_CHANGES when something critical is found",
@@ -197,6 +231,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--no-context", action="store_true", help="send diffs only, without whole-file context"
+    )
+    parser.add_argument(
+        "--repo-context",
+        action="store_true",
+        help="also pull in callers of the changed functions (costs code-search requests)",
     )
     parser.add_argument("--metrics", action="store_true", help="print the metrics block")
     parser.add_argument("--no-color", action="store_true")

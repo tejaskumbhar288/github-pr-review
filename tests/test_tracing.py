@@ -6,6 +6,8 @@ which is what a real Langfuse rejects when it is wrong.
 
 from __future__ import annotations
 
+import pytest
+
 from app.obs.metrics import ReviewMetrics
 from app.obs.tracing import LangfuseTracer, Tracer, build_tracer
 
@@ -155,3 +157,45 @@ def test_a_stale_trace_id_is_not_reused_by_the_next_review():
 
     assert len(client.scores) == 1, "only the review that had a trace gets scored"
     assert client.events[1]["trace_context"] is None
+
+
+# --- trace naming (progress note 7) ---------------------------------------
+
+
+def test_the_trace_carries_the_review_name_not_the_event_name():
+    """Langfuse named the trace `review_metrics`, because that event is written
+    after the review span closes. Contents were right, the label was wrong, and
+    a review could not be found by the name it was given.
+
+    Verified against the real SDK rather than a fake: the fix depends on
+    `propagate_attributes` actually writing `langfuse.trace.name`, which only
+    the SDK can confirm.
+    """
+    pytest.importorskip("langfuse")
+    from langfuse import Langfuse
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    # `span_exporter` replaces the SDK's own OTLP delivery, so the test reads
+    # the spans locally and never opens a socket.
+    client = Langfuse(
+        public_key="pk-lf-test",
+        secret_key="sk-lf-test",
+        tracer_provider=provider,
+        span_exporter=exporter,
+    )
+
+    tracer = LangfuseTracer(client)
+    with tracer.review("pr-review", pr="acme/widget#7"):
+        pass
+    tracer.record(ReviewMetrics(pr="acme/widget#7", proposed_findings=2, dropped_findings=1))
+
+    named = {
+        span.name: (span.attributes or {}).get("langfuse.trace.name")
+        for span in exporter.get_finished_spans()
+    }
+    assert named == {"pr-review": "pr-review", "review_metrics": "pr-review"}

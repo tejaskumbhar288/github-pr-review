@@ -13,7 +13,7 @@ import contextvars
 import json
 import logging
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -40,6 +40,39 @@ _current_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _current_span_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "langfuse_span_id", default=None
 )
+
+# The name the trace should carry, so `record()` can restate it. See _trace_name.
+_current_trace_name: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "langfuse_trace_name", default="pr-review"
+)
+
+
+def _trace_name(name: str) -> Any:
+    """Pin the Langfuse *trace* name for everything created inside this block.
+
+    Observations carry their own names; the trace row takes one from whichever
+    observation the backend decides is authoritative. `record()` files the
+    metrics event after the review span has closed, and the trace list ended up
+    reading "review_metrics" instead of "pr-review" - contents correct, label
+    wrong, and no way to find a review by the name you gave it.
+
+    The obvious fix, `update_trace`, does not exist in this SDK line. The
+    supported route is `propagate_attributes`, which writes `langfuse.trace.name`
+    onto every span opened inside it. Both the review span and the metrics event
+    are opened inside one, so whichever the backend reads, they agree.
+
+    Degrades to a plain no-op context on any SDK that lacks it, because a wrong
+    label is not worth failing a review over.
+    """
+    try:
+        from langfuse import propagate_attributes
+    except ImportError:  # pragma: no cover - older SDK line
+        return nullcontext()
+    try:
+        return propagate_attributes(trace_name=name)
+    except TypeError:  # pragma: no cover - signature drift
+        log.debug("langfuse propagate_attributes has no trace_name; leaving the trace unnamed")
+        return nullcontext()
 
 
 class Tracer:
@@ -88,22 +121,26 @@ class LangfuseTracer(Tracer):
         # whatever this task reviewed last.
         _current_trace_id.set(None)
         _current_span_id.set(None)
-        try:
-            span = self._client.start_observation(name=name, as_type="span", metadata=metadata)
-            _current_trace_id.set(span.trace_id)
-            _current_span_id.set(span.id)
-        except Exception as exc:  # noqa: BLE001 - tracing must never break a review
-            log.debug("langfuse span failed: %s", exc)
+        _current_trace_name.set(name)
+        # Opened and closed around the span so the trace carries the review's
+        # name, not the name of whichever observation was written last.
+        with _trace_name(name):
+            try:
+                span = self._client.start_observation(name=name, as_type="span", metadata=metadata)
+                _current_trace_id.set(span.trace_id)
+                _current_span_id.set(span.id)
+            except Exception as exc:  # noqa: BLE001 - tracing must never break a review
+                log.debug("langfuse span failed: %s", exc)
 
-        handle = _LangfuseSpan(span, self._client) if span is not None else Span()
-        try:
-            yield handle
-        except Exception as exc:
-            handle.update(level="ERROR", status_message=str(exc)[:500])
-            handle.end()
-            raise
-        else:
-            handle.end()
+            handle = _LangfuseSpan(span, self._client) if span is not None else Span()
+            try:
+                yield handle
+            except Exception as exc:
+                handle.update(level="ERROR", status_message=str(exc)[:500])
+                handle.end()
+                raise
+            else:
+                handle.end()
 
     def record(self, metrics: ReviewMetrics) -> None:
         super().record(metrics)
@@ -123,11 +160,12 @@ class LangfuseTracer(Tracer):
                 context = {"trace_id": trace_id}
                 if span_id:
                     context["parent_span_id"] = span_id
-            self._client.create_event(
-                name="review_metrics",
-                metadata=payload,
-                trace_context=context,
-            )
+            with _trace_name(_current_trace_name.get()):
+                self._client.create_event(
+                    name="review_metrics",
+                    metadata=payload,
+                    trace_context=context,
+                )
             if trace_id is None:
                 # Langfuse requires a score to reference exactly one of
                 # traceId/sessionId/datasetRunId/observationId and rejects the

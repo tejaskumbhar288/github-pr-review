@@ -30,6 +30,81 @@ log = logging.getLogger(__name__)
 
 PY_SUFFIXES = {".py", ".pyi"}
 
+# --- test-path noise ------------------------------------------------------
+
+# Rules that are correct in general and wrong in a test file. The pre-pass runs
+# `--isolated` deliberately: the PR's own ruff config is not available here, so
+# whatever per-directory ignores the project has set are invisible to us. That
+# trade is right - most repos have no config we could read anyway - but it means
+# the one thing nearly every Python project silences under `tests/` arrives at
+# full volume.
+#
+# Measured, not guessed: of 14 static findings on the first real review this
+# tool posted, ten were `S101 Use of assert detected` on test files. `assert` is
+# how pytest works. Ten of fourteen slots spent telling a maintainer that their
+# tests contain assertions is how a review bot gets muted in its second week.
+#
+# Each entry is a rule that is *structurally* inapplicable to test code, not one
+# that merely fires often there. The distinction is the whole safety argument:
+# suppressing a rule that could still catch a real bug in a test trades noise
+# for silence, which is the worse failure and the harder one to notice.
+TEST_PATH_IGNORES = frozenset(
+    {
+        # pytest's entire assertion model. Not a finding; a language feature.
+        "S101",
+        # Fixtures are injected by name and are routinely unused in the body.
+        # A test signature is a request for setup, not a parameter list.
+        "ARG001",
+        "ARG002",
+        "ARG005",
+        # Credentials in tests are fakes by construction. A real secret checked
+        # into a test is a secret-scanning problem - a different tool, with a
+        # different confidence level and a different response.
+        "S105",
+        "S106",
+        "S107",
+    }
+)
+
+# Path shapes that mean "test" across the ecosystems this reviewer sees. Listed
+# explicitly rather than folded into one clever regex, because a false positive
+# here silences a real finding on production code.
+_TEST_DIR_PARTS = frozenset(
+    {"test", "tests", "testing", "__tests__", "spec", "specs", "e2e", "integration_tests"}
+)
+_TEST_FILE_PREFIXES = ("test_", "spec_")
+_TEST_FILE_INFIXES = (".test.", ".spec.", "_test.", "_spec.")
+
+
+def is_test_path(path: str) -> bool:
+    """Is this file test code, rather than the code under test?
+
+    Conservative on purpose. `src/testing_utils.py` is production code that
+    happens to start with the right letters, so a prefix has to be followed by
+    something - and the directory check only looks at parent components, never
+    at the file name itself.
+    """
+    if not path:
+        return False
+    parts = path.replace("\\", "/").lstrip("./").split("/")
+    name = parts[-1]
+
+    if any(part.lower() in _TEST_DIR_PARTS for part in parts[:-1]):
+        return True
+    if any(infix in name for infix in _TEST_FILE_INFIXES):
+        return True
+    stem = name.rsplit(".", 1)[0]
+    if stem == "conftest":
+        return True
+    return any(
+        stem.startswith(prefix) and len(stem) > len(prefix) for prefix in _TEST_FILE_PREFIXES
+    )
+
+
+def is_known_irrelevant(finding: StaticFinding) -> bool:
+    """Would a human reviewer delete this finding without reading the code?"""
+    return is_test_path(finding.file) and finding.code in TEST_PATH_IGNORES
+
 
 @dataclass(frozen=True)
 class StaticFinding:
@@ -48,6 +123,8 @@ class StaticAnalyzer:
 
     def __init__(self, settings: Settings):
         self._settings = settings
+        self.suppressed_count = 0
+        """Findings dropped by the test-path suppression list on the last run."""
 
     def resolve(self, name: str) -> str | None:
         """Find a linter on PATH, or failing that inside the running venv.
@@ -82,6 +159,7 @@ class StaticAnalyzer:
         return found
 
     async def analyze(self, pr: PullRequest, file_contents: dict[str, str]) -> list[StaticFinding]:
+        self.suppressed_count = 0
         if not self._settings.static_analysis or not file_contents:
             return []
         tools = self.available_tools()
@@ -226,15 +304,26 @@ class StaticAnalyzer:
         """
         kept: list[StaticFinding] = []
         seen: set[tuple[str, int, str]] = set()
+        suppressed = 0
         for f in findings:
             pr_file = pr.file(f.file)
             if pr_file is None or f.line not in pr_file.patch.commentable:
+                continue
+            if self._settings.suppress_test_noise and is_known_irrelevant(f):
+                suppressed += 1
                 continue
             key = (f.file, f.line, f.code)
             if key in seen:
                 continue
             seen.add(key)
             kept.append(f)
+
+        # Counted and logged rather than silently discarded. A suppression list
+        # is a claim about what does not matter, and a wrong claim is invisible
+        # unless the number it removes is visible somewhere.
+        self.suppressed_count = suppressed
+        if suppressed:
+            log.info("suppressed %d known-irrelevant static finding(s) on test paths", suppressed)
 
         kept.sort(key=lambda f: (f.file, f.line, f.code))
         limit = self._settings.max_known_issues

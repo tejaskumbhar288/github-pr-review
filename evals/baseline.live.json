@@ -1,0 +1,95 @@
+{
+  "summary": {
+    "provider": "gemini",
+    "model": "gemini-3.6-flash",
+    "cases": 4,
+    "errors": 0,
+    "detection": 0.75,
+    "bugs_found": 3,
+    "found_by_model": 3,
+    "found_by_linter": 0,
+    "bugs_expected": 4,
+    "noise_per_case": 0.0,
+    "drop_rate": 0.0,
+    "forbidden_hits": 0,
+    "total_tokens": 62464,
+    "duration_s": 517.6
+  },
+  "cases": [
+    {
+      "name": "httpx-unreachable-except",
+      "kind": "live",
+      "found": [
+        "httpx/dispatch/connection_pool.py:128 except NewConnectionRequired is dead code - the preceding except BaseException catches it first <- model httpx/dispatch/connection_pool.py:128 Unreachable exception handler and missing connection cleanup"
+      ],
+      "missed": [],
+      "noise": [],
+      "forbidden_hits": [],
+      "total_findings": 1,
+      "found_by_model": 1,
+      "found_by_linter": 0,
+      "drop_rate": 0.0,
+      "dropped": 0,
+      "proposed": 1,
+      "tokens": 17274,
+      "latency_ms": 64922.82220898778,
+      "error": null
+    },
+    {
+      "name": "httpx-typo-and-missing-return",
+      "kind": "live",
+      "found": [
+        "httpx/dispatch/http2.py:74 assigns self.init_stated instead of self.init_started, so the flag is never actually reset <- model httpx/dispatch/http2.py:74 Typo in attribute name init_stated",
+        "httpx/dispatch/http2.py:75 recursive send() result is discarded, so execution falls through to an unbound stream_id <- model httpx/dispatch/http2.py:75 Missing return statement on recursive send retry"
+      ],
+      "missed": [],
+      "noise": [],
+      "forbidden_hits": [],
+      "total_findings": 2,
+      "found_by_model": 2,
+      "found_by_linter": 0,
+      "drop_rate": 0.0,
+      "dropped": 0,
+      "proposed": 2,
+      "tokens": 4963,
+      "latency_ms": 391194.34362699394,
+      "error": null
+    },
+    {
+      "name": "urllib3-decoded-buffer-leak",
+      "kind": "live",
+      "found": [],
+      "missed": [
+        "src/urllib3/response.py:989 amt-is-None path prepends _decoded_buffer regardless of decode_content, unlike the else branch which raises"
+      ],
+      "noise": [],
+      "forbidden_hits": [],
+      "total_findings": 0,
+      "found_by_model": 0,
+      "found_by_linter": 0,
+      "drop_rate": 0.0,
+      "dropped": 0,
+      "proposed": 0,
+      "tokens": 31270,
+      "latency_ms": 42924.462944007246,
+      "error": null
+    },
+    {
+      "name": "urllib3-clean-typo-fix",
+      "kind": "live",
+      "found": [],
+      "missed": [],
+      "noise": [],
+      "forbidden_hits": [],
+      "total_findings": 0,
+      "found_by_model": 0,
+      "found_by_linter": 0,
+      "drop_rate": 0.0,
+      "dropped": 0,
+      "proposed": 0,
+      "tokens": 8957,
+      "latency_ms": 17291.08595298021,
+      "error": null
+    }
+  ]
+}

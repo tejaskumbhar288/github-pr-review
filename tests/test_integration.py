@@ -117,3 +117,101 @@ async def test_forged_delivery_never_reaches_the_worker(live_settings, webhook_p
     assert response.status_code == 401
     assert await queue.depth() == 0
     assert gh.posted == []
+
+
+# --- incremental review, end to end (roadmap 1) ----------------------------
+
+
+class RepushGitHub(FakeGitHub):
+    """A PR that was already reviewed once, then pushed to."""
+
+    def __init__(self, pr, contents, comparison):
+        super().__init__(pr, contents)
+        self._comparison = comparison
+        self.compares: list[tuple[str, str]] = []
+
+    async def compare(self, owner, repo, base, head, *, max_files, max_patch_lines):
+        self.compares.append((base, head))
+        return self._comparison
+
+
+@pytest.fixture
+def repushed(monkeypatch, pr, live_settings):
+    from app.github.client import Comparison, PRFile
+    from app.github.patch import parse_patch
+    from app.github.publisher import marker_for
+
+    increment = Comparison(
+        status="ahead",
+        ahead_by=2,
+        commits=2,
+        files=[
+            PRFile(
+                path="src/io.py",
+                status="modified",
+                additions=1,
+                deletions=0,
+                patch=parse_patch("@@ -30,1 +30,2 @@\n def later():\n+    return risky()\n"),
+            )
+        ],
+    )
+    gh = RepushGitHub(pr, {"src/io.py": "import os\n"}, increment)
+    gh.reviews = [{"id": 1, "body": f"{marker_for('previous-sha')} an earlier review"}]
+    llm = FakeProvider({"summary": "Adds a risky call.", "findings": []})
+
+    original = ReviewSession.__init__
+    monkeypatch.setattr(
+        ReviewSession, "__init__", lambda self, s, **kw: original(self, s, gh=gh, llm=llm)
+    )
+    return gh, llm
+
+
+async def test_a_repush_reviews_only_the_new_commits(live_settings, repushed):
+    gh, llm = repushed
+
+    async with ReviewSession(live_settings) as session:
+        outcome = await session.run("acme", "widget", 7, post=True)
+
+    assert gh.compares == [("previous-sha", "head456")]
+    assert outcome.incremental == "narrowed"
+
+    # The model saw the increment's diff, not the original PR's.
+    prompt = llm.calls[0]["user"]
+    assert "return risky()" in prompt
+    assert "incremental review" in prompt.lower()
+    assert "def save(path, data)" not in prompt
+
+    # And the reader is told, above the summary.
+    _, payload = gh.posted[0]
+    assert "Incremental review" in payload["body"]
+    assert "2 commit(s)" in payload["body"]
+
+
+async def test_full_forces_a_complete_re_read(live_settings, repushed):
+    gh, llm = repushed
+
+    async with ReviewSession(live_settings) as session:
+        outcome = await session.run("acme", "widget", 7, post=True, incremental=False)
+
+    assert gh.compares == [], "--full must not spend a compare request"
+    assert outcome.incremental == "full"
+    assert "def save(path, data)" in llm.calls[0]["user"]
+
+
+async def test_new_commits_touching_nothing_reviewable_cost_no_model_request(
+    live_settings, repushed, monkeypatch
+):
+    """The whole point of the feature: a merge from main should not spend a
+    request from a 20/day cap re-reporting the previous review."""
+    from app.github.client import Comparison
+
+    gh, llm = repushed
+    gh._comparison = Comparison(status="ahead", ahead_by=1, commits=1, files=[])
+
+    async with ReviewSession(live_settings) as session:
+        outcome = await session.run("acme", "widget", 7, post=True)
+
+    assert outcome.incremental == "nothing_new"
+    assert llm.calls == [], "no model request"
+    assert gh.posted == [], "and no second review saying nothing changed"
+    assert outcome.published is not None and not outcome.published.posted

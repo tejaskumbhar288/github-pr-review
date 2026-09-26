@@ -15,6 +15,7 @@ from .base import (
     LLMProvider,
     LLMResponse,
     RateLimited,
+    SamplingFailure,
     TokenUsage,
     parse_json_payload,
     retry_after_seconds,
@@ -81,12 +82,14 @@ class GeminiProvider(LLMProvider):
         max_retries: int = 5,
         timeout: float = 180.0,
         client: httpx.AsyncClient | None = None,
+        max_sampling_retries: int = 2,
     ):
         if not api_key:
             raise LLMError("GeminiProvider requires an API key")
         self._key = api_key
         self.model = model
         self._max_retries = max_retries
+        self._max_sampling_retries = max_sampling_retries
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(timeout))
 
@@ -104,8 +107,14 @@ class GeminiProvider(LLMProvider):
                 "maxOutputTokens": MAX_OUTPUT_TOKENS,
             },
         }
+        # How many times the model has failed to produce a usable answer. Not a
+        # counter for its own sake: it is what makes each re-roll different from
+        # the attempt that failed. See _sampling_temperature.
+        rerolls = 0
 
         async def _call() -> tuple[dict[str, Any], str]:
+            nonlocal rerolls
+            payload["generationConfig"]["temperature"] = _sampling_temperature(temperature, rerolls)
             try:
                 resp = await self._client.post(
                     url, json=payload, headers={"x-goog-api-key": self._key}
@@ -130,9 +139,17 @@ class GeminiProvider(LLMProvider):
             # cut off produced a complete 643-token review on the next attempt -
             # so it has to be raised where the backoff can still see it.
             data = resp.json()
-            return data, _extract_text(data)
+            try:
+                return data, _extract_text(data)
+            except SamplingFailure:
+                rerolls += 1
+                raise
 
-        outcome = await with_backoff(_call, max_retries=self._max_retries)
+        outcome = await with_backoff(
+            _call,
+            max_retries=self._max_retries,
+            max_sampling_retries=self._max_sampling_retries,
+        )
         data, text = outcome.value
         return LLMResponse(
             data=parse_json_payload(text),
@@ -146,6 +163,34 @@ class GeminiProvider(LLMProvider):
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+
+# How far each re-roll nudges the temperature, and the ceiling it stops at.
+# 0.35 is enough to leave the neighbourhood of a stuck decode; 0.9 keeps the
+# output recognisably a code review rather than a creative writing exercise.
+REROLL_TEMPERATURE_STEP = 0.35
+MAX_SAMPLING_TEMPERATURE = 0.9
+
+
+def _sampling_temperature(base: float, rerolls: int) -> float:
+    """Raise the temperature on each re-roll after a sampling failure.
+
+    Retrying is the right response to a truncated or empty response - the same
+    prompt that stopped at answer=26383 returned a complete 643-token review
+    moments later. But reviews run at temperature 0.2, where decoding is close
+    to deterministic, so *re-sending the identical request is the least likely
+    thing to change the outcome*. A fixture whose whole file is 400 characters
+    burned two attempts producing answer=30893 and then answer=31638 tokens:
+    that is a decode stuck in a loop, and it stayed stuck because nothing about
+    the second attempt differed from the first.
+
+    Nudging the temperature is what makes a retry a genuinely new sample. It
+    costs nothing, applies only after a failure, and leaves the first attempt -
+    the one that succeeds almost always - at the low temperature a review wants.
+    """
+    if rerolls <= 0:
+        return base
+    return min(base + REROLL_TEMPERATURE_STEP * rerolls, MAX_SAMPLING_TEMPERATURE)
 
 
 def _quota_error(resp: httpx.Response) -> Exception:
@@ -241,9 +286,11 @@ def _extract_text(data: dict[str, Any]) -> str:
     # sent half an object to the parser, which could only report "model did
     # not return JSON" - hiding the one cause the caller can actually act on.
     if finish == "MAX_TOKENS":
-        # Retryable: see the note in complete_json. If every attempt truncates,
-        # the prompt really is too big and the message says which knobs to turn.
-        raise RateLimited(
+        # Retryable, on the sampling budget rather than the rate-limit one: the
+        # request was already billed, so a re-roll is not free. If every attempt
+        # truncates, the prompt really is too big and the message says which
+        # knobs to turn.
+        raise SamplingFailure(
             f"gemini hit the {MAX_OUTPUT_TOKENS}-token output limit mid-response"
             f"{_token_breakdown(data)} - retrying; if this persists, "
             "lower MAX_FILES or CONTEXT_CHAR_LIMIT"
@@ -261,7 +308,7 @@ def _extract_text(data: dict[str, Any]) -> str:
     # RECITATION is the one seen in practice - Gemini suppresses output it
     # believes reproduces training data - and it is plainly intermittent: the
     # fixture that tripped it scored 2/2 on both immediate retries.
-    raise RateLimited(f"gemini returned empty text (finishReason={finish})")
+    raise SamplingFailure(f"gemini returned empty text (finishReason={finish})")
 
 
 def _token_breakdown(data: dict[str, Any]) -> str:

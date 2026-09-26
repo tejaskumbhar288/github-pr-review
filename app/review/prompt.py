@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .analysis import StaticFinding, render_known_issues
+from .repo_context import RepoContext
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..github.client import PullRequest
@@ -78,6 +79,7 @@ def build_user_prompt(
     pr: PullRequest,
     file_context: dict[str, str] | None = None,
     known_issues: list[StaticFinding] | None = None,
+    repo_context: RepoContext | None = None,
 ) -> str:
     parts: list[str] = [
         f"# Pull request: {pr.title}",
@@ -94,6 +96,18 @@ def build_user_prompt(
             "spend your attention on what linters cannot detect - intent, edge "
             "cases, and reasoning that spans functions.\n"
             f"```\n{render_known_issues(known_issues)}\n```"
+        )
+
+    if pr.is_incremental:
+        # Said plainly, because the model would otherwise report the absence of
+        # things it cannot see - "this function is never called", "no tests were
+        # added" - about code that is simply outside the increment.
+        parts.append(
+            f"\n## Scope: incremental review\n"
+            f"This PR was already reviewed at an earlier commit. The diff below "
+            f"covers ONLY the {pr.new_commits} commit(s) pushed since then, not the "
+            f"whole pull request. Do not comment on the absence of anything that "
+            f"may already exist in the part of the PR you cannot see here."
         )
 
     parts.append(
@@ -122,6 +136,19 @@ def build_user_prompt(
         )
         for path, content in file_context.items():
             parts.append(f"\n### {path} (full file at HEAD)\n```\n{content}\n```")
+
+    if repo_context is not None and repo_context.call_sites:
+        parts.append(
+            "\n## Callers elsewhere in the repo\n"
+            f"Code outside this PR that references "
+            f"{', '.join(f'`{s}`' for s in repo_context.symbols)}. Use it to judge "
+            "whether the change breaks an existing caller - a changed signature, a "
+            "return that can now be None, an inverted condition. These excerpts are "
+            "context only: they are not part of the diff and cannot be commented on, "
+            "so anchor any finding they lead you to on the changed line that causes "
+            "it."
+        )
+        parts.append(repo_context.render())
 
     if pr.truncated_files:
         parts.append(

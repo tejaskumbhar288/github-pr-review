@@ -70,11 +70,40 @@ class Settings:
     max_patch_lines: int = 800
     max_files: int = 40
     max_retries: int = 5
+    # A *separate*, smaller budget for the model simply failing to answer -
+    # truncation, an empty candidate, a recitation block. Both kinds of failure
+    # arrive as a retryable error, but they cost differently: a rate limit is
+    # the provider asking us to wait, while a sampling failure spends a request
+    # from a 20/day free-tier cap on a re-roll. Five re-rolls of one review can
+    # take a quarter of the day's budget, and an 812s fixture run is what that
+    # looks like from the outside.
+    #
+    # Three rather than two: measured. At two, a fixture that hit a degeneration
+    # loop had exactly one re-roll to escape it and did not. Each re-roll also
+    # raises the temperature (see llm.gemini._sampling_temperature), so the
+    # third attempt is meaningfully different from the first two rather than a
+    # third identical draw.
+    max_sampling_retries: int = 3
     # Files larger than this are sent as diff-only; whole-file context is the
     # biggest quality lever but also the biggest token sink.
     context_char_limit: int = 60_000
     # Cap on concurrent whole-file fetches, to stay polite to the REST API.
     context_concurrency: int = 8
+
+    # --- Repo-aware context (roadmap 2) ---
+    # Pull the *callers* of a changed function, not just the file it lives in.
+    # Off by default, and that is a budget decision rather than a quality one:
+    # it leans on GitHub's code search, which is 30 requests/minute across the
+    # whole account, so a busy webhook install would starve its own queue with
+    # it on. Turn it on for CLI reviews (`--repo-context`) where the budget is
+    # yours to spend, or set REPO_CONTEXT=1 when the install is quiet enough.
+    repo_context: bool = False
+    repo_context_max_symbols: int = 3
+    """Identifiers searched for per review; each one costs a search request."""
+    repo_context_max_files: int = 4
+    """Distinct calling files pulled in per review."""
+    repo_context_per_file: int = 3
+    """Call-site windows shown per calling file."""
     request_timeout: float = 180.0
 
     # --- Publishing (roadmap 1) ---
@@ -82,6 +111,13 @@ class Settings:
     # non-blocking one: a bot that blocks merges on a hallucination gets removed.
     review_event: str = "COMMENT"
     post_reviews: bool = False
+
+    # --- Incremental review (roadmap 1) ---
+    # On a re-push, review only the commits added since our last review of this
+    # PR. Falls back to the whole diff whenever that is not safe - no prior
+    # review, a force-push, a failed compare - so the worst case is today's
+    # behaviour. Set INCREMENTAL_REVIEW=0 to always re-read the whole PR.
+    incremental_review: bool = True
 
     # --- Queue / worker (roadmap 3) ---
     redis_url: str = "redis://localhost:6379/0"
@@ -111,6 +147,11 @@ class Settings:
     semgrep_config: str = "p/default"
     static_analysis_timeout: float = 60.0
     max_known_issues: int = 60
+    # Drop lint rules that are structurally inapplicable to test code (S101 and
+    # friends). On by default: the pre-pass runs isolated from the PR's own ruff
+    # config, so the ignores every project sets under tests/ are invisible to it
+    # and the findings arrive at full volume. See analysis.TEST_PATH_IGNORES.
+    suppress_test_noise: bool = True
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Settings:
@@ -131,11 +172,17 @@ class Settings:
             max_patch_lines=_int(e, "MAX_PATCH_LINES", 800, minimum=1),
             max_files=_int(e, "MAX_FILES", 40, minimum=1),
             max_retries=_int(e, "MAX_RETRIES", 5, minimum=1),
+            max_sampling_retries=_int(e, "MAX_SAMPLING_RETRIES", 3, minimum=1),
             context_char_limit=_int(e, "CONTEXT_CHAR_LIMIT", 60_000, minimum=0),
             context_concurrency=_int(e, "CONTEXT_CONCURRENCY", 8, minimum=1),
+            repo_context=_bool(e, "REPO_CONTEXT", False),
+            repo_context_max_symbols=_int(e, "REPO_CONTEXT_MAX_SYMBOLS", 3, minimum=1),
+            repo_context_max_files=_int(e, "REPO_CONTEXT_MAX_FILES", 4, minimum=1),
+            repo_context_per_file=_int(e, "REPO_CONTEXT_PER_FILE", 3, minimum=1),
             request_timeout=float(_int(e, "REQUEST_TIMEOUT", 180, minimum=5)),
             review_event=_str(e, "REVIEW_EVENT", "COMMENT").upper(),
             post_reviews=_bool(e, "POST_REVIEWS", False),
+            incremental_review=_bool(e, "INCREMENTAL_REVIEW", True),
             redis_url=_str(e, "REDIS_URL", "redis://localhost:6379/0"),
             queue_name=_str(e, "QUEUE_NAME", "reviews"),
             idempotency_ttl=_int(e, "IDEMPOTENCY_TTL", 86_400, minimum=60),
@@ -151,6 +198,7 @@ class Settings:
             semgrep_config=_str(e, "SEMGREP_CONFIG", "p/default"),
             static_analysis_timeout=float(_int(e, "STATIC_ANALYSIS_TIMEOUT", 60, minimum=5)),
             max_known_issues=_int(e, "MAX_KNOWN_ISSUES", 60, minimum=0),
+            suppress_test_noise=_bool(e, "SUPPRESS_TEST_NOISE", True),
         )
 
     def with_overrides(self, **kwargs: Any) -> Settings:

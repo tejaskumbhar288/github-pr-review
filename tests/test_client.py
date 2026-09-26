@@ -221,3 +221,73 @@ async def test_token_is_sent_when_present():
     async with GitHubClient("secret-token") as gh:
         assert await gh.fetch_file("o", "r", "a.py", "head") == "print(1)"
     assert route.calls[0].request.headers["authorization"] == "Bearer secret-token"
+
+
+# --- compare: the basis of an incremental review ---------------------------
+
+
+COMPARE_FILE = {
+    "filename": "src/io.py",
+    "status": "modified",
+    "additions": 2,
+    "deletions": 1,
+    "patch": '@@ -6,2 +6,3 @@\n-    open(p, "w").write(d)\n+    with open(p, "w") as fh:\n+        fh.write(d)\n',
+}
+
+
+@respx.mock
+async def test_compare_returns_the_files_between_two_commits():
+    respx.get(f"{API}/repos/o/r/compare/aaa...bbb").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "ahead",
+                "ahead_by": 2,
+                "behind_by": 0,
+                "commits": [{"sha": "c1"}, {"sha": "c2"}],
+                "files": [COMPARE_FILE],
+            },
+        )
+    )
+    async with GitHubClient(None) as gh:
+        out = await gh.compare("o", "r", "aaa", "bbb", max_files=40, max_patch_lines=800)
+
+    assert out.status == "ahead" and out.ahead_by == 2 and out.commits == 2
+    assert out.is_fast_forward
+    assert [f.path for f in out.files] == ["src/io.py"]
+    # The patch is parsed the same way a PR's is, so anchors stay real.
+    assert out.files[0].patch.commentable
+
+
+@respx.mock
+@pytest.mark.parametrize("status", ["diverged", "behind"])
+async def test_compare_reports_a_rewritten_history(status):
+    respx.get(f"{API}/repos/o/r/compare/aaa...bbb").mock(
+        return_value=httpx.Response(
+            200, json={"status": status, "ahead_by": 1, "behind_by": 3, "files": []}
+        )
+    )
+    async with GitHubClient(None) as gh:
+        out = await gh.compare("o", "r", "aaa", "bbb", max_files=40, max_patch_lines=800)
+    assert not out.is_fast_forward
+
+
+@respx.mock
+async def test_compare_applies_the_same_exclusions_as_a_full_review():
+    """When the two drifted, a file the full review skipped reappeared in the
+    increment."""
+    respx.get(f"{API}/repos/o/r/compare/aaa...bbb").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "ahead",
+                "ahead_by": 1,
+                "files": [COMPARE_FILE, {"filename": "poetry.lock", "patch": "@@ -1 +1 @@\n+x\n"}],
+            },
+        )
+    )
+    async with GitHubClient(None) as gh:
+        out = await gh.compare("o", "r", "aaa", "bbb", max_files=40, max_patch_lines=800)
+
+    assert [f.path for f in out.files] == ["src/io.py"]
+    assert out.truncated_files == 1

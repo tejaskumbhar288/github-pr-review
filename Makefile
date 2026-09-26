@@ -2,7 +2,8 @@ VENV := .venv
 PY   := $(VENV)/bin/python
 PIP  := $(VENV)/bin/pip
 
-.PHONY: help install review test lint fmt eval eval-baseline serve worker dlq up down clean
+.PHONY: help install review test lint fmt eval eval-baseline eval-diff serve worker dlq \
+        resolution resolution-summary up down clean
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -46,6 +47,13 @@ worker: ## Run the async review worker
 
 dlq: ## Show the dead-letter queue (make dlq ARGS=--requeue to drain it)
 	$(PY) -m app.server.dlq $(ARGS)
+
+resolution: ## What happened to our comments: make resolution URL=<pr-url>
+	@test -n "$(URL)" || (echo "usage: make resolution URL=<pr-url> [RECORD=1]"; exit 1)
+	$(PY) -m app.review.resolution $(URL) $(if $(RECORD),--record,) $(ARGS)
+
+resolution-summary: ## Aggregate the recorded resolution signal across all PRs
+	$(PY) -m app.review.resolution --summary
 
 up: ## Bring up redis + api + worker
 	docker compose up --build

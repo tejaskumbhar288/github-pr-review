@@ -1,150 +1,209 @@
-# Progress — 23 August 2026
+# Progress — 25 August 2026
 
-Thirteen commits. The theme was not features: it was that almost every bug
-found today was a guard that could not fire in the case it was written for,
-and each one was invisible because the system degraded quietly instead of
-failing loudly.
+The 23 August note left nine open items. Eight are done. The ninth needs a
+credit card, not code.
 
-## Shipped today
+The theme this time was not new bugs of the same family — it was that **closing
+three of yesterday's items immediately produced a new instance of yesterday's
+pattern**, and the eval suite caught it within the hour.
 
-### The Gemini client stopped lying about why it failed
+## Shipped
 
-Five separate defects, all in the same small area, all found by running the
-thing rather than reading it.
+### The roadmap is finished
 
-| Commit | What was wrong |
-|---|---|
-| `0bbd7bb` | Every 429 was treated as transient. The free tier caps at **20 requests per day, per model**, so four eval cases at five retries each spent exactly the day's budget on attempts that could never succeed. The retry logic was causing the outage it existed to survive. |
-| `5b64f3b` | `_extract_text()` returned the text whenever it was non-empty and checked `finishReason` afterwards, so the `MAX_TOKENS` branch could only fire when the model emitted *nothing*. Real truncation always emits partial text, so users got "model did not return JSON" — true, and pointing at the wrong thing. |
-| `cf0ccd8` | `maxOutputTokens` was never sent, so the cap came from each model's default and the same review finished on one model and was cut off on another. Now explicit, and the error breaks the spend down. |
-| `df1ce78` | Truncation failed the whole review. It is sampling variance: the prompt that ran to `answer=26383` returned a complete 643-token review moments later. It could not be retried where it was detected — extraction ran *after* `with_backoff` returned — so extraction moved inside the retried call. |
-| `3b20493` | `finishReason=RECITATION` killed a fixture mid-run. Tested rather than assumed: the same case scored 2/2 on both immediate retries. Empty output is now retryable for every reason except `SAFETY`, which is a decision about the content and will be reached again. |
+All three follow-ups from the README are implemented, tested and documented.
 
-One change was **reverted the same day**: a `maxItems` bound on the response
-schema. `gemini-3.5-flash-lite` and `gemini-3.1-flash-lite` reject the entire
-request with a bare 400 when the schema carries it. A response schema has to be
-the one thing that works on every model.
+**Incremental review.** A re-push now reviews only the commits added since our
+last review of the same PR, found through the SHA in our own review marker. The
+narrowing is used *only* when GitHub reports the head is a fast-forward of that
+commit: after a rebase the diff between the two mixes new work with rewritten
+history, and reviewing that as an increment would report the author's rebase as
+changes. No prior review, a failed compare, or a deleted base commit all fall
+back to the whole diff, so the worst case is exactly the old behaviour.
 
-### The GitHub App path ran for the first time
+The scope is stated in the posted review *above the summary*, because a reader
+who does not know a review covered two commits will read "no blocking issues
+found" as a verdict on the whole PR. New commits touching nothing reviewable — a
+merge from main, a lockfile bump — post nothing and spend no model request.
 
-It was the only code in the repo that had never executed. It now does, end to
-end, against the real API — JWT signed with the private key, accepted by
-`GET /app`, exchanged for a `ghs_` installation token, second call served from
-cache in 0.01ms, and that token reading a file through the ordinary client.
+**Repo-aware context.** `review/repo_context.py` finds the callers of what
+changed: it parses the touched files, works out which definitions the diff hit,
+and ranks a changed *signature* above a changed body — a new function has no
+callers to break, while a new signature on an existing name is exactly the
+change that breaks them. Call sites come back as numbered windows, not whole
+files.
 
-`4145fbd` turns that into tests that skip unless an App is configured. One
-asserts the installation grants `contents:read` and `pull_requests:write` **and
-nothing else** — over-permissioning is silent, so nothing else would notice it
-eroding.
+Lexical search, not embeddings, and that is the interesting part: a call site is
+found by an exact identifier, which is the one query lexical search answers
+perfectly and vector search answers fuzzily. No index to build, nothing to keep
+in sync with the branch, no way for the retrieval to be quietly stale.
 
-Two deployment defects surfaced while containerising it:
+It is **off by default**, which is a budget decision and not a quality one:
+GitHub code search is 30 requests/minute across the whole account, so a busy
+webhook install would starve its own queue. `--repo-context` turns it on per
+review.
 
-- `54be46e` → `3c6fdb8`: the mounted key. The image runs as uid 10001, a bind
-  mount carries host ownership through unchanged, and a key at mode 600 owned by
-  the developer is unreadable to the process that needs it. The worker died on
-  `PermissionError`. Loosening a private key's permissions to suit a container
-  is the wrong trade, so the inline `GITHUB_PRIVATE_KEY` form is used instead —
-  which is also the only shape Fly or Render can accept.
-- The PEM header contains spaces, so unquoted in `.env` it breaks
-  `set -a; . ./.env` with a bewildering `RSA: command not found`.
+Verified against the real API on `encode/httpx`, and the first run returned
+**zero callers** — which is where the two fixes came from. The search was led by
+four markdown files, and the one code file it did return was `__init__.py`,
+where the only match is the string `"AsyncClient"` in an `__all__` list. An
+export manifest is not a caller: it says nothing about how the changed code is
+used, while spending a slot from the budget a real call site needed. Findings
+now require a real *use* (`name(`, `name.`, `name[`) rather than a mention, and
+the query carries `language:python`, which is exactly correct because symbols
+are only ever extracted from Python files. Same PR, after: **10 call sites
+across 4 files**, all genuine instantiations.
 
-### A real review, posted by the bot
+**Comment resolution.** `python -m app.review.resolution <url>` reports what
+happened to every comment the bot posted: `addressed` (the anchored line has
+changed since), `acknowledged` (a reply or positive reaction), `disputed` (a 👎),
+`open`.
 
-`senior-review-bot[bot]` reviewed
-[financial-doc-agent#24](https://github.com/tejaskumbhar288/financial-doc-agent/pull/24)
-after a genuine GitHub delivery through a tunnel: **81.8s, 2 findings, both
-true, zero false positives.**
+The headline number **ignores `open` entirely** and reports only the ratio among
+comments that drew a response, because silence is not rejection — most open
+comments are on PRs nobody has revisited. It returns `None`, not 100%, when
+nothing has responded yet. A weak signal read honestly beats a strong one read
+wrongly.
 
-- **MAJOR** — `seen[description]` overwrites unconditionally, so `$1200 / $500 /
-  $1200` never flags the identical first and third lines. It also caught a
-  consequence I had explicitly dismissed: `duplicate_value` reads whichever
-  amount was stored last, so the reported total is wrong too. The tool was right
-  and I was wrong.
-- **MINOR** — `ignored_descriptions` is not normalised while item descriptions
-  are, so a caller passing `"Shipping & Handling"` silently fails to match. A
-  real bug, introduced by accident, that nobody had noticed.
+### A clean baseline, at last
 
-It missed the `confidence=0.25` issue on that run, having caught it in a direct
-call minutes earlier. Sampling variance, recorded rather than re-rolled.
+`evals/baseline.json` was re-recorded after installing semgrep — in that order,
+because semgrep shifts detections toward "by linter" and invalidates the old
+numbers.
 
-Everything downstream was verified in production: signature rejection (401 on a
-forged delivery), draft and bot-authored PRs skipped, `ping` answered, and
-**idempotency** — reopening the PR logged `duplicate job dropped` at the same
-head SHA and correctly spent no model request.
+**4 cases, 0 errors, detection 100% (6/6 — 3 by model, 3 by linter), noise/case
+0.0, drop rate 0.0%.**
 
-### Evals grew a live suite
+It took two attempts, and the first one is the interesting one. See below.
 
-`a7a8c34` adds four cases built on real pull requests. Every expectation was
-raised by a maintainer of the project in review and then re-verified against the
-file at the PR's head SHA, because a review comment's line number goes stale the
-moment the author pushes again. **Three otherwise-good candidates were dropped**
-for exactly that — the bug had already been revised away.
+### The live suite completed for the first time
 
-The PRs are closed-unmerged deliberately: a merged PR usually has its defect
-fixed before merge, while a rejected one keeps it forever. One case is clean by
-construction, so the suite measures false positives and not only detection.
+`evals/baseline.live.json`. Both cases that had **never** finished — `httpx#453`
+and `urllib3#3647` — ran to completion.
 
-`c91f571`: eval runs had never reached Langfuse. The harness built its
-`ReviewEngine` without a tracer and fell through to the no-op base class, while
-the CLI and worker — which go through `Pipeline` — were traced normally. Fixed,
-including the `flush()` whose absence looks identical to tracing being off.
+**4 real PRs, 0 errors: detection 75% (3/4), noise/case 0.0, drop rate 0.0%.**
 
-`620a61c` and `51c638e`: a diff is only meaningful when both sides are
-comparable, and neither failure is visible in the numbers. The tool now says so
-when the baseline came from a different model, and when the baseline itself was
-recorded from a run that errored.
+- `httpx#453` — found. Previously unknown whether it could be.
+- `httpx#647` — 2/2.
+- `urllib3#3647` — completed, and **missed** its bug: the `amt is None` path
+  prepends `_decoded_buffer` regardless of `decode_content`, unlike the `else`
+  branch which raises. Recorded as a miss rather than re-rolled.
+- `urllib3#2838`, clean by construction — correctly silent. Zero false
+  positives, which is the number the suite exists to protect.
 
-### Housekeeping
+### Static-analysis noise is gone
 
-- Pushed to `github-pr-review`; CI runs on every push.
-- All `Co-Authored-By: Claude` trailers stripped from history and force-pushed.
-- `GITHUB_TOKEN` and `GITHUB_WEBHOOK_SECRET` were exposed in a transcript by a
-  careless `docker compose config`; both rotated. The webhook rotation was
-  **silently broken** until tested — three copies must agree (`.env`, the running
-  container, GitHub's App config) and the container had a stale one, so two
-  deliveries were rejected with 401 before it was caught by hashing each copy.
-- `fly.toml` written, with scale-to-zero deliberately off.
+Of 14 findings on the first real review this bot posted, ten were `S101 Use of
+assert detected` on test files. `assert` is how pytest works.
 
-## Tomorrow
+The pre-pass runs `ruff --isolated` deliberately — the PR's own config is not
+available to us — but the consequence was not deliberate: every ignore a project
+sets under `tests/` is invisible, so those findings arrive at full volume.
 
-**Blocked only by the daily quota, which resets at 12:30 IST** (midnight
-Pacific — not midnight local; this cost real confusion today).
+There is now a suppression list scoped to test paths, and the entry criterion
+matters more than the list: a rule qualifies only if it is *structurally*
+inapplicable to test code, not merely noisy there. Suppressing a rule that could
+still catch a real bug in a test trades noise for silence, which is the worse
+failure and the harder one to notice. The count is logged rather than swallowed.
 
-1. **Record a clean baseline.** Today's attempt hit the quota on the last of
-   four cases and wrote a baseline describing three. It was restored rather than
-   committed. Needs ~4 requests with headroom.
-2. **A clean live-eval run.** Two of the four live cases — `httpx#453` and
-   `urllib3#3647` — have *never* completed. Their bugs are verified; whether the
-   reviewer finds them is still unknown.
+On the first live run afterwards it removed **6 findings from one real PR and 2
+from another**.
 
-**Ready to start, no blockers.**
+### Retry budgets, split — and then fixed properly
 
-3. **Deploy to Fly** (~$2/month). Everything it needs is proven. `fly.toml`
-   exists; what remains is a Fly account, `flyctl`, a managed Redis URL, and
-   `fly secrets set`. Then repoint the App's webhook with the same
-   `PATCH /app/hook/config` call used for the tunnel. The current tunnel is
-   ephemeral — when that terminal closes the URL dies.
-4. **Write up the bugs.** The material is unusually good and costs nothing: a
-   retry loop that burned the quota it was meant to survive; a monotonic counter
-   subtracted from wall clock, logging `queued -1787342661.8s ago`; a guard that
-   could only fire in the case that never happens.
+Rate limits and sampling failures now have separate budgets. Waiting out a rate
+limit is free, so it keeps the full five attempts; a re-roll spends another
+request from a 20/day cap, so it gets three.
 
-**Known gaps in the reviewer itself.**
+**Then the eval suite immediately proved the split was not enough.** A fixture
+whose entire file is 400 characters burned two attempts producing `answer=30893`
+and then `answer=31638` tokens. That is not truncation — that is a decode stuck
+in a loop, and it stayed stuck because **reviews run at temperature 0.2, where
+decoding is nearly deterministic**. Re-sending the identical request was the
+least likely thing in the system to change the outcome. The retry was
+implemented as "try again" when it needed to be "sample again".
 
-5. **Static-analysis noise.** Of 14 findings on PR #24, about ten were
-   `S101 Use of assert detected` on test files — `assert` is how pytest works.
-   It is a ruff config gap in that repo, but the reviewer should drop
-   known-irrelevant static findings for test paths rather than padding a review
-   with them.
-6. **Retries are expensive against a 20/day cap.** Making truncation and empty
-   responses retryable was correct, but a bad draw now costs up to five requests
-   instead of one, and the fixture run took 812s. Worth a smaller retry budget
-   for sampling failures than for rate limits.
-7. **Langfuse names traces `review_metrics`** instead of `pr-review`. Contents
-   are correct; this SDK version has no `update_trace`. Cosmetic, documented.
+Each re-roll now raises the temperature (0.2 → 0.55 → 0.9, capped), leaving the
+first attempt — the one that succeeds almost always — where a review wants it.
+On the next clean run the same fixture truncated twice more and **succeeded on
+the third, highest-temperature attempt**. At the previous budget it would have
+failed again.
 
-**Optional / untouched.**
+This is the same bug as the quota-burning retry loop from 23 August, seen from
+the other side: retrying cost quota, so the budget was cut — and cutting the
+budget without making the retries *different* just meant failing sooner.
 
-8. `pip install semgrep` — do it *before* re-recording the baseline, since it
-   shifts detections toward "by linter" and invalidates the old numbers.
-9. Roadmap 1–3: incremental review, repo-aware context, comment resolution.
+The same "extract after the retry loop" shape was still present in the Ollama
+provider, where an empty local response failed the whole review with no retry
+possible. Fixed to match Gemini.
+
+### Langfuse names its traces correctly
+
+Traces read `review_metrics` instead of `pr-review`, because the metrics event
+is written after the review span closes. `update_trace` does not exist in this
+SDK line, which is where the last investigation stopped.
+
+The supported route is `propagate_attributes(trace_name=...)`, which writes
+`langfuse.trace.name` onto every span opened inside it. Both the review span and
+the metrics event are now opened inside one, so whichever the backend reads,
+they agree. Verified against the real SDK with an in-memory exporter, not a
+fake — the fix depends on the SDK actually setting that attribute, which only
+the SDK can confirm. That assertion is now a test.
+
+### Deployment, as far as it can go without an account
+
+The image was built and run: it imports the app, resolves ruff, and answers
+`/healthz` with a 200. `scripts/deploy-fly.sh` does everything after
+`fly auth login` — including one-lining the PEM (the inline form is the only one
+Fly can accept) and the `PATCH /app/hook/config` webhook repoint, which is done
+in the script rather than by hand because that secret has three copies that must
+agree and a rotation updating two of them fails closed.
+
+One discrepancy is now stated out loud instead of inferred: the image ships ruff
+but not semgrep — a heavy dependency for a 512MB VM — so a containerised review
+is not identical to a local one. The worker logs which linters it can reach at
+startup.
+
+### The bugs are written up
+
+`docs/bugs.md`. Eleven defects, of which nine are the same shape: **a guard that
+could not fire in the case it was written for**, hidden because the system
+degraded quietly instead of failing loudly. The retry loop that caused the
+outage it existed to survive; a monotonic counter subtracted from wall clock; a
+`finishReason` check that ran after the text was already accepted; a re-roll
+that was not a new sample; and one found by a test written the same hour — an
+`if not ours:` on a dictionary that always had keys, so the "no comments here"
+explanation never appeared.
+
+## Numbers
+
+| | before | after |
+|---|---|---|
+| Offline eval | 83% detection, 1 errored case | **100% (6/6), 0 errors** |
+| Live eval | 2 of 4 cases had never completed | **4/4 completed, 75% detection** |
+| Tests | 250 | **326** offline + 25 Redis |
+| Roadmap items open | 3 | **0** |
+
+## Still open
+
+**Blocked on an account, not on code.** Deploying to Fly (~$2/month) needs a Fly
+account, `flyctl`, and a managed Redis URL. `scripts/deploy-fly.sh` refuses to
+run with an instruction rather than a stack trace when any of the three is
+missing. The current tunnel is ephemeral — when that terminal closes the URL
+dies.
+
+**Worth doing next.**
+
+1. `urllib3#3647` is a real miss, now reproducible. It is the first live case
+   where the reviewer completed and was wrong, which makes it the most useful
+   prompt-tuning signal available — and the baseline exists to tell whether a
+   change that fixes it costs anything elsewhere.
+2. Repo-aware context retrieves correctly against a real repo, but has never
+   been *scored*: no eval case yet turns it on, so whether those 10 call sites
+   change a finding is unmeasured. That is the run worth doing next, and the
+   baseline now exists to say whether it costs anything elsewhere. Note the
+   limitation it exposed: code search indexes the default branch as it is
+   today, so on an old PR the callers may have been renamed away — which is
+   exactly what `httpx#453`'s `HTTP2Connection` had been.
+3. Comment resolution has no data yet. It needs the bot to post reviews people
+   actually respond to, which needs the deployment above.

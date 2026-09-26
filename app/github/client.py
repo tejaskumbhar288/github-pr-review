@@ -105,6 +105,30 @@ class PRFile:
 
 
 @dataclass
+class Comparison:
+    """The result of comparing two commits - the basis of an incremental review."""
+
+    status: str
+    """GitHub's word for the relationship: identical, ahead, behind or diverged."""
+    ahead_by: int = 0
+    behind_by: int = 0
+    commits: int = 0
+    files: list[PRFile] = field(default_factory=list)
+    truncated_files: int = 0
+
+    @property
+    def is_fast_forward(self) -> bool:
+        """Is ``head`` simply ``base`` plus more commits?
+
+        Only then is the compare a description of *new work*. After a rebase or
+        a force-push the two have diverged, and the diff between them is a
+        mixture of new commits and rewritten old ones - reviewing that as if it
+        were an increment would report the author's history rewrite as changes.
+        """
+        return self.status in {"ahead", "identical"}
+
+
+@dataclass
 class PullRequest:
     owner: str
     repo: str
@@ -119,6 +143,15 @@ class PullRequest:
     state: str = "open"
     truncated_files: int = 0
     """Files present in the PR but excluded from review (skipped or over budget)."""
+
+    incremental_base: str | None = None
+    """When set, ``files`` describes only the commits added since this SHA."""
+    new_commits: int = 0
+    """Commits between ``incremental_base`` and ``head_sha``."""
+
+    @property
+    def is_incremental(self) -> bool:
+        return self.incremental_base is not None
 
     @property
     def slug(self) -> str:
@@ -251,29 +284,11 @@ class GitHubClient:
             )
             if not batch:
                 break
-            for item in batch:
-                if len(files) >= max_files:
-                    excluded += 1
-                    continue
-                path = item["filename"]
-                if should_skip(path):
-                    excluded += 1
-                    continue
-                patch_text = item.get("patch")
-                if patch_text and len(patch_text.splitlines()) > max_patch_lines:
-                    # Generated or vendored; not worth the tokens.
-                    excluded += 1
-                    continue
-                files.append(
-                    PRFile(
-                        path=path,
-                        status=item.get("status", "modified"),
-                        additions=int(item.get("additions") or 0),
-                        deletions=int(item.get("deletions") or 0),
-                        patch=parse_patch(patch_text, max_lines=max_patch_lines),
-                        previous_path=item.get("previous_filename"),
-                    )
-                )
+            collected, skipped = _collect_files(
+                batch, max_files=max_files - len(files), max_patch_lines=max_patch_lines
+            )
+            files.extend(collected)
+            excluded += skipped
             if len(batch) < 100:
                 break
             page += 1
@@ -290,6 +305,36 @@ class GitHubClient:
             author=(meta.get("user") or {}).get("login", ""),
             draft=bool(meta.get("draft")),
             state=meta.get("state", "open"),
+            truncated_files=excluded,
+        )
+
+    async def compare(
+        self,
+        owner: str,
+        repo: str,
+        base: str,
+        head: str,
+        *,
+        max_files: int,
+        max_patch_lines: int,
+    ) -> Comparison:
+        """Diff two commits, in the same shape as a PR's file list.
+
+        This is what makes an incremental review possible: given the commit we
+        reviewed last and the current head, GitHub will hand back exactly the
+        files the author has touched since, with patches already anchored to the
+        new file - so every line number the review depends on stays correct.
+        """
+        data = await self.get_json(f"/repos/{owner}/{repo}/compare/{base}...{head}")
+        files, excluded = _collect_files(
+            data.get("files") or [], max_files=max_files, max_patch_lines=max_patch_lines
+        )
+        return Comparison(
+            status=str(data.get("status") or "unknown"),
+            ahead_by=int(data.get("ahead_by") or 0),
+            behind_by=int(data.get("behind_by") or 0),
+            commits=len(data.get("commits") or []),
+            files=files,
             truncated_files=excluded,
         )
 
@@ -323,6 +368,43 @@ class GitHubClient:
 
     async def __aexit__(self, *exc: object) -> None:
         await self.close()
+
+
+def _collect_files(
+    items: list[dict[str, Any]], *, max_files: int, max_patch_lines: int
+) -> tuple[list[PRFile], int]:
+    """Turn GitHub's file entries into PRFiles, dropping what is not worth tokens.
+
+    Shared by ``fetch_pr`` and ``compare`` so an incremental review applies
+    exactly the same exclusions as a full one. When the two drifted, a file the
+    full review skipped could reappear in the increment.
+    """
+    files: list[PRFile] = []
+    excluded = 0
+    for item in items:
+        if len(files) >= max_files:
+            excluded += 1
+            continue
+        path = item["filename"]
+        if should_skip(path):
+            excluded += 1
+            continue
+        patch_text = item.get("patch")
+        if patch_text and len(patch_text.splitlines()) > max_patch_lines:
+            # Generated or vendored; not worth the tokens.
+            excluded += 1
+            continue
+        files.append(
+            PRFile(
+                path=path,
+                status=item.get("status", "modified"),
+                additions=int(item.get("additions") or 0),
+                deletions=int(item.get("deletions") or 0),
+                patch=parse_patch(patch_text, max_lines=max_patch_lines),
+                previous_path=item.get("previous_filename"),
+            )
+        )
+    return files, excluded
 
 
 def _is_rate_limited(resp: httpx.Response) -> bool:
